@@ -1,0 +1,5 @@
+package com.example.ridooo
+
+import io.flutter.embedding.android.FlutterActivity
+
+class MainActivity : FlutterActivity()
