@@ -74,11 +74,11 @@ android/app/upload-keystore.jks
 The following sensitive information is now protected:
 
 ### Supabase
-- **URL**: `https://qhdijnngaqyguhhzdxcg.supabase.co`
-- **Anon Key**: `sb_publishable_8A0NsQj13kzkCqa8RKm9AQ_guLSPyfv`
+- **URL**: `[SECURED - See .env file]`
+- **Anon Key**: `[SECURED - See .env file]`
 
 ### Google Maps
-- **API Key**: `AIzaSyAf_pTgJh4LcJPaNhFcizYbWtjmR3wA1bc`
+- **API Key**: `[SECURED - See .env file]`
 
 ⚠️ **These values are now only in:**
 - `.env` (local, not committed)

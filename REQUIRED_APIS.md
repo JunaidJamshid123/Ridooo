@@ -9,7 +9,7 @@
   - Display pickup and dropoff locations
   - Show nearby drivers
   - Route visualization
-- **API Key**: AIzaSyAf_pTgJh4LcJPaNhFcizYbWtjmR3wA1bc (Already configured)
+- **API Key**: (Configured via environment variables - see ENV_SETUP.md)
 - **Cost**: $7 per 1,000 map loads (first $200/month free)
 
 ### 2. **Directions API** ⚠️ REQUIRED
