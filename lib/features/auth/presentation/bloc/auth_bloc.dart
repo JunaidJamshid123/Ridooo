@@ -7,7 +7,6 @@ import 'auth_state.dart';
 class AuthBloc extends Bloc<AuthEvent, AuthState> {
   final LoginUseCase loginUseCase;
   final RegisterUseCase registerUseCase;
-  // Add more use cases as needed
 
   AuthBloc({
     required this.loginUseCase,
@@ -41,11 +40,15 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
       email: event.email,
       password: event.password,
       phoneNumber: event.phoneNumber,
+      role: event.role,
+      licenseNumber: event.licenseNumber,
+      vehicleModel: event.vehicleModel,
+      vehiclePlate: event.vehiclePlate,
     );
     
     result.fold(
       (failure) => emit(AuthError(failure.message)),
-      (user) => emit(AuthAuthenticated(user)),
+      (user) => emit(AuthRegisteredSuccess('Account created successfully! Please login.')),
     );
   }
 

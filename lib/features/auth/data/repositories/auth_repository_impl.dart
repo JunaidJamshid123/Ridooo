@@ -4,7 +4,7 @@ import '../../../../core/errors/failures.dart';
 import '../../domain/entities/user.dart';
 import '../../domain/repositories/auth_repository.dart';
 import '../datasources/auth_local_datasource.dart';
-import '../datasources/auth_remote_datasource.dart';
+import '../datasources/auth_remote_datasource_supabase.dart';
 
 class AuthRepositoryImpl implements AuthRepository {
   final AuthRemoteDataSource remoteDataSource;
@@ -30,6 +30,8 @@ class AuthRepositoryImpl implements AuthRepository {
       await localDataSource.cacheUser(userModel);
       
       return Right(userModel.toEntity());
+    } on AuthenticationException catch (e) {
+      return Left(AuthenticationFailure(e.message));
     } on ServerException catch (e) {
       return Left(ServerFailure(e.message));
     } on NetworkException catch (e) {
@@ -45,6 +47,10 @@ class AuthRepositoryImpl implements AuthRepository {
     required String email,
     required String password,
     required String phoneNumber,
+    required UserRole role,
+    String? licenseNumber,
+    String? vehicleModel,
+    String? vehiclePlate,
   }) async {
     try {
       final userModel = await remoteDataSource.register(
@@ -52,12 +58,18 @@ class AuthRepositoryImpl implements AuthRepository {
         email: email,
         password: password,
         phoneNumber: phoneNumber,
+        role: role,
+        licenseNumber: licenseNumber,
+        vehicleModel: vehicleModel,
+        vehiclePlate: vehiclePlate,
       );
       
       // Cache user locally
       await localDataSource.cacheUser(userModel);
       
       return Right(userModel.toEntity());
+    } on AuthenticationException catch (e) {
+      return Left(AuthenticationFailure(e.message));
     } on ServerException catch (e) {
       return Left(ServerFailure(e.message));
     } on NetworkException catch (e) {
@@ -79,7 +91,7 @@ class AuthRepositoryImpl implements AuthRepository {
   }
 
   @override
-  Future<Either<Failure, User>> getCurrentUser() async {
+  Future<Either<Failure, User?>> getCurrentUser() async {
     try {
       // Try to get cached user first
       final cachedUser = await localDataSource.getCachedUser();
@@ -89,13 +101,16 @@ class AuthRepositoryImpl implements AuthRepository {
       
       // If no cached user, fetch from remote
       final userModel = await remoteDataSource.getCurrentUser();
-      await localDataSource.cacheUser(userModel);
+      if (userModel != null) {
+        await localDataSource.cacheUser(userModel);
+        return Right(userModel.toEntity());
+      }
       
-      return Right(userModel.toEntity());
+      return const Right(null);
     } on CacheException catch (e) {
       return Left(CacheFailure(e.message));
     } catch (e) {
-      return Left(ServerFailure(e.toString()));
+      return const Right(null);
     }
   }
 }

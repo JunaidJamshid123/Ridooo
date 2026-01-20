@@ -13,9 +13,13 @@ abstract class AuthRepository {
     required String email,
     required String password,
     required String phoneNumber,
+    required UserRole role,
+    String? licenseNumber,
+    String? vehicleModel,
+    String? vehiclePlate,
   });
   
   Future<Either<Failure, void>> logout();
   
-  Future<Either<Failure, User>> getCurrentUser();
+  Future<Either<Failure, User?>> getCurrentUser();
 }
