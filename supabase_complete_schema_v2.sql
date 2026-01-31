@@ -10,6 +10,8 @@
 -- ============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+CREATE EXTENSION IF NOT EXISTS "cube";
+CREATE EXTENSION IF NOT EXISTS "earthdistance";
 
 -- ============================================================================
 -- SECTION 2: HELPER FUNCTIONS
@@ -20,6 +22,69 @@ RETURNS TRIGGER AS $$
 BEGIN
     NEW.updated_at = NOW();
     RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to auto-expire old driver offers
+CREATE OR REPLACE FUNCTION expire_old_driver_offers()
+RETURNS INTEGER AS $$
+DECLARE
+    expired_count INTEGER;
+BEGIN
+    UPDATE driver_offers
+    SET status = 'expired',
+        updated_at = NOW()
+    WHERE status = 'pending' 
+    AND expires_at < NOW();
+    
+    GET DIAGNOSTICS expired_count = ROW_COUNT;
+    RETURN expired_count;
+END;
+$$ LANGUAGE plpgsql;
+
+-- Function to find nearby online drivers
+CREATE OR REPLACE FUNCTION find_nearby_drivers(
+    p_lat DECIMAL, 
+    p_lng DECIMAL, 
+    p_radius_km INTEGER DEFAULT 10,
+    p_limit INTEGER DEFAULT 50
+)
+RETURNS TABLE(
+    driver_id UUID,
+    driver_name TEXT,
+    driver_rating DECIMAL,
+    driver_total_rides INTEGER,
+    vehicle_model TEXT,
+    vehicle_plate TEXT,
+    latitude DECIMAL,
+    longitude DECIMAL,
+    distance_km DECIMAL,
+    is_available BOOLEAN
+) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT 
+        d.id,
+        u.name,
+        d.rating,
+        d.total_rides,
+        d.vehicle_model,
+        d.vehicle_plate,
+        dl.latitude,
+        dl.longitude,
+        ROUND(CAST(earth_distance(
+            ll_to_earth(p_lat, p_lng),
+            ll_to_earth(dl.latitude, dl.longitude)
+        ) / 1000 AS NUMERIC), 2) AS distance,
+        d.is_available
+    FROM driver_locations dl
+    INNER JOIN drivers d ON d.id = dl.driver_id
+    INNER JOIN users u ON u.id = d.id
+    WHERE dl.is_online = true
+    AND d.is_available = true
+    AND earth_box(ll_to_earth(p_lat, p_lng), p_radius_km * 1000) @> ll_to_earth(dl.latitude, dl.longitude)
+    ORDER BY distance
+    LIMIT p_limit;
 END;
 $$ LANGUAGE plpgsql;
 
@@ -251,6 +316,57 @@ CREATE TABLE ride_requests (
     expires_at TIMESTAMP WITH TIME ZONE DEFAULT (NOW() + INTERVAL '30 seconds'),
     UNIQUE(ride_id, driver_id)
 );
+
+-- ============================================================================
+-- SECTION 9B: DRIVER OFFERS (InDrive-style Bidding)
+-- ============================================================================
+
+DROP TABLE IF EXISTS driver_offers CASCADE;
+
+CREATE TABLE driver_offers (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    ride_id UUID REFERENCES rides(id) ON DELETE CASCADE NOT NULL,
+    driver_id UUID REFERENCES drivers(id) ON DELETE CASCADE NOT NULL,
+    
+    -- Offer details
+    offered_price DECIMAL(10,2) NOT NULL CHECK (offered_price > 0),
+    estimated_arrival_min INTEGER,
+    message TEXT,
+    
+    -- Driver info (denormalized for quick access)
+    driver_name TEXT NOT NULL,
+    driver_phone TEXT,
+    driver_photo TEXT,
+    driver_rating DECIMAL(3,2) DEFAULT 5.0,
+    driver_total_rides INTEGER DEFAULT 0,
+    vehicle_model TEXT NOT NULL,
+    vehicle_color TEXT,
+    vehicle_plate TEXT NOT NULL,
+    
+    -- Status tracking
+    status TEXT NOT NULL DEFAULT 'pending' 
+        CHECK (status IN ('pending', 'accepted', 'rejected', 'expired', 'cancelled')),
+    
+    -- Timestamps
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+    expires_at TIMESTAMP WITH TIME ZONE DEFAULT (NOW() + INTERVAL '5 minutes'),
+    responded_at TIMESTAMP WITH TIME ZONE,
+    
+    UNIQUE(ride_id, driver_id)
+);
+
+-- Indexes for driver_offers
+CREATE INDEX idx_driver_offers_ride_id ON driver_offers(ride_id) WHERE status = 'pending';
+CREATE INDEX idx_driver_offers_driver_id ON driver_offers(driver_id);
+CREATE INDEX idx_driver_offers_status ON driver_offers(status);
+CREATE INDEX idx_driver_offers_expires_at ON driver_offers(expires_at) WHERE status = 'pending';
+
+-- Trigger to update updated_at
+DROP TRIGGER IF EXISTS update_driver_offers_updated_at ON driver_offers;
+CREATE TRIGGER update_driver_offers_updated_at
+    BEFORE UPDATE ON driver_offers
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at_column();
 
 -- ============================================================================
 -- SECTION 10: DRIVER LOCATIONS
@@ -517,6 +633,7 @@ CREATE TRIGGER update_driver_locations_updated_at
 ALTER TABLE users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE drivers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE driver_locations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE driver_offers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE wallets ENABLE ROW LEVEL SECURITY;
 ALTER TABLE wallet_transactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE saved_places ENABLE ROW LEVEL SECURITY;
@@ -544,6 +661,11 @@ DROP POLICY IF EXISTS "Anyone can insert during driver signup" ON drivers;
 DROP POLICY IF EXISTS "Users can view available drivers" ON drivers;
 DROP POLICY IF EXISTS "Drivers can manage their own location" ON driver_locations;
 DROP POLICY IF EXISTS "Users can view online driver locations" ON driver_locations;
+DROP POLICY IF EXISTS "Users can view offers for their rides" ON driver_offers;
+DROP POLICY IF EXISTS "Drivers can create offers" ON driver_offers;
+DROP POLICY IF EXISTS "Drivers can view their own offers" ON driver_offers;
+DROP POLICY IF EXISTS "Users can accept offers" ON driver_offers;
+DROP POLICY IF EXISTS "Drivers can cancel their own offers" ON driver_offers;
 DROP POLICY IF EXISTS "Users can view their own wallet" ON wallets;
 DROP POLICY IF EXISTS "Users can update their own wallet" ON wallets;
 DROP POLICY IF EXISTS "System can create wallets" ON wallets;
@@ -603,6 +725,30 @@ CREATE POLICY "Drivers can manage their own location" ON driver_locations
 
 CREATE POLICY "Users can view online driver locations" ON driver_locations
     FOR SELECT USING (is_online = true);
+
+-- DRIVER OFFERS
+CREATE POLICY "Users can view offers for their rides" ON driver_offers
+    FOR SELECT USING (
+        ride_id IN (SELECT id FROM rides WHERE user_id = auth.uid())
+    );
+
+CREATE POLICY "Drivers can create offers" ON driver_offers
+    FOR INSERT WITH CHECK (auth.uid() = driver_id);
+
+CREATE POLICY "Drivers can view their own offers" ON driver_offers
+    FOR SELECT USING (auth.uid() = driver_id);
+
+CREATE POLICY "Users can accept offers" ON driver_offers
+    FOR UPDATE USING (
+        ride_id IN (SELECT id FROM rides WHERE user_id = auth.uid())
+        AND status = 'pending'
+    );
+
+CREATE POLICY "Drivers can cancel their own offers" ON driver_offers
+    FOR UPDATE USING (
+        auth.uid() = driver_id 
+        AND status = 'pending'
+    );
 
 -- WALLETS
 CREATE POLICY "Users can view their own wallet" ON wallets

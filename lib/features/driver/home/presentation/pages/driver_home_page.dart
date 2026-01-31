@@ -1,9 +1,16 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../../../../core/theme/app_colors.dart';
+import '../../../rides/presentation/bloc/driver_rides_bloc.dart';
+import '../../../rides/presentation/bloc/driver_rides_event.dart';
+import '../../../rides/presentation/bloc/driver_rides_state.dart';
+import '../../../rides/presentation/widgets/create_offer_bottom_sheet.dart';
+import '../../../rides/presentation/pages/active_ride_page.dart';
+import '../../../../user/booking/domain/entities/ride.dart';
 
 /// Driver home page with Google Maps and online/offline toggle
 class DriverHomePage extends StatefulWidget {
@@ -20,7 +27,10 @@ class _DriverHomePageState extends State<DriverHomePage> {
   final Set<Marker> _markers = {};
   Timer? _locationTimer;
   
-  // Mock data - nearby ride requests
+  // Real ride requests from BLoC
+  List<Ride> _nearbyRides = [];
+  
+  // Legacy mock data (for backwards compatibility)
   final List<Map<String, dynamic>> _nearbyRequests = [
     {
       'id': '1',
@@ -53,6 +63,32 @@ class _DriverHomePageState extends State<DriverHomePage> {
   void initState() {
     super.initState();
     _getCurrentLocation();
+    _initializeBloc();
+  }
+
+  void _initializeBloc() {
+    // Start listening to new rides and offer status updates
+    try {
+      context.read<DriverRidesBloc>().add(const ListenToNewRides());
+      context.read<DriverRidesBloc>().add(const ListenToOfferStatus());
+    } catch (e) {
+      // BLoC not available, will use mock data
+      debugPrint('DriverRidesBloc not available: $e');
+    }
+  }
+
+  void _loadNearbyRides() {
+    if (_currentPosition == null) return;
+    
+    try {
+      context.read<DriverRidesBloc>().add(LoadNearbyRideRequests(
+        latitude: _currentPosition!.latitude,
+        longitude: _currentPosition!.longitude,
+        radiusKm: 10,
+      ));
+    } catch (e) {
+      debugPrint('Could not load nearby rides: $e');
+    }
   }
 
   @override
@@ -128,21 +164,40 @@ class _DriverHomePageState extends State<DriverHomePage> {
       );
     }
 
-    // Add nearby ride requests
+    // Add nearby ride requests from BLoC or mock data
     if (_isOnline) {
-      for (var request in _nearbyRequests) {
-        _markers.add(
-          Marker(
-            markerId: MarkerId(request['id']),
-            position: LatLng(request['lat'], request['lng']),
-            icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
-            infoWindow: InfoWindow(
-              title: request['userName'],
-              snippet: '${request['pickup']} → ${request['destination']}',
+      // Use real rides if available
+      if (_nearbyRides.isNotEmpty) {
+        for (var ride in _nearbyRides) {
+          _markers.add(
+            Marker(
+              markerId: MarkerId(ride.id),
+              position: LatLng(ride.pickupLatitude, ride.pickupLongitude),
+              icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+              infoWindow: InfoWindow(
+                title: 'Ride Request',
+                snippet: '${ride.pickupAddress.split(',').first} → ${ride.dropoffAddress.split(',').first}',
+              ),
+              onTap: () => _showRideRequestDetails(ride),
             ),
-            onTap: () => _showRequestDetails(request),
-          ),
-        );
+          );
+        }
+      } else {
+        // Fallback to mock data
+        for (var request in _nearbyRequests) {
+          _markers.add(
+            Marker(
+              markerId: MarkerId(request['id']),
+              position: LatLng(request['lat'], request['lng']),
+              icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen),
+              infoWindow: InfoWindow(
+                title: request['userName'],
+                snippet: '${request['pickup']} → ${request['destination']}',
+              ),
+              onTap: () => _showRequestDetails(request),
+            ),
+          );
+        }
       }
     }
 
@@ -153,6 +208,22 @@ class _DriverHomePageState extends State<DriverHomePage> {
     setState(() {
       _isOnline = !_isOnline;
     });
+
+    // Update BLoC status
+    try {
+      context.read<DriverRidesBloc>().add(ToggleOnlineStatus(_isOnline));
+      
+      if (_isOnline && _currentPosition != null) {
+        context.read<DriverRidesBloc>().add(UpdateDriverLocation(
+          latitude: _currentPosition!.latitude,
+          longitude: _currentPosition!.longitude,
+          isOnline: true,
+        ));
+        _loadNearbyRides();
+      }
+    } catch (e) {
+      debugPrint('Could not update BLoC status: $e');
+    }
 
     if (_isOnline) {
       _startLocationUpdates();
@@ -193,6 +264,195 @@ class _DriverHomePageState extends State<DriverHomePage> {
         ),
       );
     }
+  }
+
+  /// Show details for a real ride request from BLoC
+  void _showRideRequestDetails(Ride ride) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(20),
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 20),
+            Row(
+              children: [
+                Container(
+                  width: 50,
+                  height: 50,
+                  decoration: BoxDecoration(
+                    color: AppColors.primary,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: const Icon(Icons.local_taxi, color: Colors.white, size: 26),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${ride.vehicleType.toUpperCase()} Ride',
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: AppColors.textPrimary,
+                        ),
+                      ),
+                      Row(
+                        children: [
+                          const Icon(Icons.straighten, size: 16, color: AppColors.primary),
+                          const SizedBox(width: 4),
+                          Text(
+                            '${ride.distanceKm.toStringAsFixed(1)} km',
+                            style: const TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.textSecondary,
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Text(
+                            '~${ride.estimatedDurationMinutes} min',
+                            style: const TextStyle(
+                              fontSize: 14,
+                              color: AppColors.textSecondary,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: AppColors.primary.withOpacity(0.1),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: Text(
+                    '₨${ride.estimatedFare.toStringAsFixed(0)}',
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: AppColors.primary,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+            Container(
+              padding: const EdgeInsets.all(14),
+              decoration: BoxDecoration(
+                color: Colors.grey.shade50,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      const Icon(Icons.trip_origin, size: 16, color: AppColors.success),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          ride.pickupAddress,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.textPrimary,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      const SizedBox(width: 7),
+                      Container(
+                        width: 2,
+                        height: 20,
+                        color: Colors.grey.shade300,
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      const Icon(Icons.location_on, size: 16, color: AppColors.error),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(
+                          ride.dropoffAddress,
+                          style: const TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: AppColors.textPrimary,
+                          ),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _showCreateOfferSheet(ride);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                child: const Text(
+                  'Make an Offer',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// Show create offer bottom sheet
+  void _showCreateOfferSheet(Ride ride) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => CreateOfferBottomSheet(ride: ride),
+    );
   }
 
   void _showRequestDetails(Map<String, dynamic> request) {
@@ -378,67 +638,147 @@ class _DriverHomePageState extends State<DriverHomePage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: Stack(
-        children: [
-          // Google Map
-          GoogleMap(
-            initialCameraPosition: CameraPosition(
-              target: _currentPosition != null
-                  ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
-                  : _defaultLocation,
-              zoom: 14.0,
-            ),
-            onMapCreated: (controller) {
-              _mapController = controller;
-              _updateMarkers();
-            },
-            markers: _markers,
-            myLocationEnabled: true,
-            myLocationButtonEnabled: false,
-            zoomControlsEnabled: false,
-            mapToolbarEnabled: false,
-            compassEnabled: false,
-          ),
-
-          // Top info bar
-          SafeArea(
-            child: Column(
-              children: [
-                Container(
-                  margin: const EdgeInsets.all(16),
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-                  decoration: BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.1),
-                        blurRadius: 10,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
+    return BlocListener<DriverRidesBloc, DriverRidesState>(
+      listener: (context, state) {
+        if (state is NearbyRidesLoaded) {
+          setState(() {
+            _nearbyRides = state.rides;
+            _isOnline = state.isOnline;
+          });
+          _updateMarkers();
+        } else if (state is NewRideAvailable) {
+          // A new ride request came in via real-time
+          setState(() {
+            _nearbyRides = [..._nearbyRides, state.ride];
+          });
+          _updateMarkers();
+          
+          // Show notification
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Row(
+                children: [
+                  const Icon(Icons.local_taxi, color: Colors.white),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text('New ride request: ${state.ride.pickupAddress.split(',').first}'),
                   ),
-                  child: Row(
-                    children: [
-                      Container(
-                        width: 8,
-                        height: 8,
-                        decoration: BoxDecoration(
-                          color: _isOnline ? AppColors.success : Colors.grey,
-                          shape: BoxShape.circle,
+                ],
+              ),
+              backgroundColor: AppColors.primary,
+              behavior: SnackBarBehavior.floating,
+              action: SnackBarAction(
+                label: 'View',
+                textColor: Colors.white,
+                onPressed: () => _showRideRequestDetails(state.ride),
+              ),
+            ),
+          );
+        } else if (state is OfferCreated) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Offer sent successfully!'),
+              backgroundColor: AppColors.success,
+            ),
+          );
+        } else if (state is OfferAccepted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('🎉 Your offer was accepted! Starting navigation...'),
+              backgroundColor: AppColors.success,
+            ),
+          );
+          // Navigate to active ride screen
+          final bloc = context.read<DriverRidesBloc>();
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => BlocProvider.value(
+                value: bloc,
+                child: DriverActiveRidePage(
+                  ride: state.ride,
+                  offer: state.offer,
+                ),
+              ),
+            ),
+          );
+        } else if (state is OfferRejected) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('Offer was declined by the user'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+        } else if (state is DriverRidesError) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(state.message),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      },
+      child: Scaffold(
+        body: Stack(
+          children: [
+            // Google Map
+            GoogleMap(
+              initialCameraPosition: CameraPosition(
+                target: _currentPosition != null
+                    ? LatLng(_currentPosition!.latitude, _currentPosition!.longitude)
+                    : _defaultLocation,
+                zoom: 14.0,
+              ),
+              onMapCreated: (controller) {
+                _mapController = controller;
+                _updateMarkers();
+              },
+              markers: _markers,
+              myLocationEnabled: true,
+              myLocationButtonEnabled: false,
+              zoomControlsEnabled: false,
+              mapToolbarEnabled: false,
+              compassEnabled: false,
+            ),
+
+            // Top info bar
+            SafeArea(
+              child: Column(
+                children: [
+                  Container(
+                    margin: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(12),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.1),
+                          blurRadius: 10,
+                          offset: const Offset(0, 2),
                         ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        _isOnline ? 'Online' : 'Offline',
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          color: _isOnline ? AppColors.success : AppColors.textSecondary,
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Container(
+                          width: 8,
+                          height: 8,
+                          decoration: BoxDecoration(
+                            color: _isOnline ? AppColors.success : Colors.grey,
+                            shape: BoxShape.circle,
+                          ),
                         ),
-                      ),
-                      const Spacer(),
+                        const SizedBox(width: 10),
+                        Text(
+                          _isOnline ? 'Online' : 'Offline',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: _isOnline ? AppColors.success : AppColors.textSecondary,
+                          ),
+                        ),
+                        const Spacer(),
                       if (_isOnline)
                         Container(
                           padding: const EdgeInsets.symmetric(
@@ -541,6 +881,7 @@ class _DriverHomePageState extends State<DriverHomePage> {
           ),
         ],
       ),
-    );
+      ), // Close BlocListener child (Scaffold)
+    ); // Close BlocListener
   }
 }

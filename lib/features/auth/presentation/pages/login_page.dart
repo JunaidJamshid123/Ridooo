@@ -1,12 +1,17 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/navigation/main_navigation.dart';
 import '../../../../core/navigation/driver_navigation.dart';
+import '../../../../core/config/supabase_config.dart';
+import '../../../../injection_container.dart' as di;
+import '../../../user/booking/presentation/bloc/booking_bloc.dart';
+import '../../../driver/rides/presentation/bloc/driver_rides_bloc.dart';
 import '../../domain/entities/user.dart';
 import '../bloc/auth_bloc.dart';
 import '../bloc/auth_event.dart';
-import '../bloc/auth_state.dart';
+import '../bloc/auth_state.dart' as bloc_state;
 import '../widgets/custom_text_field.dart';
 import 'signup_page.dart';
 
@@ -53,25 +58,74 @@ class _LoginPageState extends State<LoginPage> {
           onPressed: () => Navigator.pop(context),
         ),
       ),
-      body: BlocConsumer<AuthBloc, AuthState>(
-        listener: (context, state) {
-          if (state is AuthAuthenticated) {
+      body: BlocConsumer<AuthBloc, bloc_state.AuthState>(
+        listener: (context, state) async {
+          if (state is bloc_state.AuthAuthenticated) {
             // Check user role and redirect accordingly
             final user = state.user;
-            if (user.role == UserRole.driver) {
-              // Redirect to driver side
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (context) => const DriverNavigation()),
+            final supabase = Supabase.instance.client;
+            final currentUser = supabase.auth.currentUser;
+            
+            if (currentUser == null) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Authentication error')),
               );
-            } else {
-              // Redirect to user side
-              Navigator.pushReplacement(
-                context,
-                MaterialPageRoute(builder: (context) => const MainNavigation()),
-              );
+              return;
             }
-          } else if (state is AuthError) {
+            
+            if (user.role == UserRole.driver) {
+              // Fetch driver profile from 'drivers' table
+              Map<String, dynamic>? driverProfile;
+              try {
+                driverProfile = await supabase
+                    .from('drivers')
+                    .select()
+                    .eq('id', currentUser.id)
+                    .maybeSingle();
+                debugPrint('Driver profile fetched: $driverProfile');
+              } catch (e) {
+                debugPrint('Error fetching driver profile: $e');
+              }
+              
+              final driverParams = di.DriverBlocParams(
+                driverId: currentUser.id,
+                driverName: user.name,
+                driverPhone: user.phoneNumber,
+                driverPhoto: user.profileImage,
+                driverRating: (driverProfile?['rating'] as num?)?.toDouble() ?? 4.5,
+                driverTotalRides: driverProfile?['total_rides'] as int? ?? 0,
+                vehicleModel: driverProfile?['vehicle_model'] as String? ?? 'Unknown',
+                vehicleColor: driverProfile?['vehicle_color'] as String?,
+                vehiclePlate: driverProfile?['vehicle_plate'] as String? ?? 'Unknown',
+              );
+              debugPrint('Driver params: name=${driverParams.driverName}, phone=${driverParams.driverPhone}');
+              
+              if (mounted) {
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => BlocProvider<DriverRidesBloc>(
+                      create: (_) => di.sl<DriverRidesBloc>(param1: driverParams),
+                      child: const DriverNavigation(),
+                    ),
+                  ),
+                );
+              }
+            } else {
+              // Redirect to user side with BookingBloc
+              if (mounted) {
+                Navigator.pushReplacement(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => BlocProvider<BookingBloc>(
+                      create: (_) => di.sl<BookingBloc>(param1: currentUser.id),
+                      child: const MainNavigation(),
+                    ),
+                  ),
+                );
+              }
+            }
+          } else if (state is bloc_state.AuthError) {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text(state.message),
@@ -82,7 +136,7 @@ class _LoginPageState extends State<LoginPage> {
           }
         },
         builder: (context, state) {
-          final isLoading = state is AuthLoading;
+          final isLoading = state is bloc_state.AuthLoading;
           
           return SafeArea(
             child: SingleChildScrollView(

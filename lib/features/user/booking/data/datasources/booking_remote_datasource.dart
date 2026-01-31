@@ -28,6 +28,12 @@ abstract class BookingRemoteDataSource {
     required String offerId,
   });
 
+  /// Reject a driver offer
+  Future<void> rejectDriverOffer({
+    required String rideId,
+    required String offerId,
+  });
+
   /// Cancel a ride
   Future<RideModel> cancelRide({
     required String rideId,

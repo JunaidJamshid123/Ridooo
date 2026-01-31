@@ -30,9 +30,29 @@ class RideModel extends Ride {
     super.startedAt,
     super.completedAt,
     super.cancelledAt,
+    super.userName,
+    super.userPhone,
+    super.userPhoto,
   });
 
   factory RideModel.fromJson(Map<String, dynamic> json) {
+    // Handle nested user object if present (from join query)
+    String? userName;
+    String? userPhone;
+    String? userPhoto;
+    
+    if (json['user'] != null && json['user'] is Map) {
+      final userJson = json['user'] as Map<String, dynamic>;
+      userName = userJson['name'] as String?;
+      userPhone = userJson['phone_number'] as String?;
+      userPhoto = userJson['profile_image'] as String?;
+    } else {
+      // Fallback to flat fields if present
+      userName = json['user_name'] as String?;
+      userPhone = json['user_phone'] as String?;
+      userPhoto = json['user_photo'] as String?;
+    }
+    
     return RideModel(
       id: json['id'] as String,
       userId: json['user_id'] as String,
@@ -75,6 +95,9 @@ class RideModel extends Ride {
       cancelledAt: json['cancelled_at'] != null
           ? DateTime.parse(json['cancelled_at'] as String)
           : null,
+      userName: userName,
+      userPhone: userPhone,
+      userPhoto: userPhoto,
     );
   }
 

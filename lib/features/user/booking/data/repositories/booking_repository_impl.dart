@@ -133,6 +133,24 @@ class BookingRepositoryImpl implements BookingRepository {
   }
 
   @override
+  Future<Either<Failure, void>> rejectDriverOffer({
+    required String rideId,
+    required String offerId,
+  }) async {
+    try {
+      await remoteDataSource.rejectDriverOffer(
+        rideId: rideId,
+        offerId: offerId,
+      );
+      return const Right(null);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
+  }
+
+  @override
   Future<Either<Failure, Ride>> cancelRide({
     required String rideId,
     String? reason,

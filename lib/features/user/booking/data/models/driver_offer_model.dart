@@ -7,6 +7,7 @@ class DriverOfferModel extends DriverOffer {
     required super.rideId,
     required super.driverId,
     required super.driverName,
+    super.driverPhone,
     super.driverPhoto,
     required super.driverRating,
     required super.driverTotalRides,
@@ -22,23 +23,20 @@ class DriverOfferModel extends DriverOffer {
   });
 
   factory DriverOfferModel.fromJson(Map<String, dynamic> json) {
-    // Handle nested driver and vehicle data
-    final driver = json['driver'] as Map<String, dynamic>?;
-    final user = driver?['user'] as Map<String, dynamic>?;
-
     return DriverOfferModel(
       id: json['id'] as String,
       rideId: json['ride_id'] as String,
       driverId: json['driver_id'] as String,
-      driverName: user?['full_name'] as String? ?? 'Unknown',
-      driverPhoto: user?['profile_photo'] as String?,
-      driverRating: (driver?['rating'] as num?)?.toDouble() ?? 0.0,
-      driverTotalRides: driver?['total_rides'] as int? ?? 0,
-      vehicleModel: driver?['vehicle_model'] as String? ?? 'Unknown',
-      vehicleColor: driver?['vehicle_color'] as String? ?? 'Unknown',
-      vehiclePlate: driver?['vehicle_plate'] as String? ?? 'Unknown',
+      driverName: json['driver_name'] as String? ?? 'Unknown',
+      driverPhone: json['driver_phone'] as String?,
+      driverPhoto: json['driver_photo'] as String?,
+      driverRating: (json['driver_rating'] as num?)?.toDouble() ?? 5.0,
+      driverTotalRides: json['driver_total_rides'] as int? ?? 0,
+      vehicleModel: json['vehicle_model'] as String? ?? 'Unknown',
+      vehicleColor: json['vehicle_color'] as String? ?? 'Unknown',
+      vehiclePlate: json['vehicle_plate'] as String? ?? 'Unknown',
       offeredPrice: (json['offered_price'] as num).toDouble(),
-      etaMinutes: json['eta_minutes'] as int?,
+      etaMinutes: json['estimated_arrival_min'] as int?,
       status: json['status'] as String,
       message: json['message'] as String?,
       createdAt: DateTime.parse(json['created_at'] as String),
@@ -51,8 +49,16 @@ class DriverOfferModel extends DriverOffer {
       'id': id,
       'ride_id': rideId,
       'driver_id': driverId,
+      'driver_name': driverName,
+      'driver_phone': driverPhone,
+      'driver_photo': driverPhoto,
+      'driver_rating': driverRating,
+      'driver_total_rides': driverTotalRides,
+      'vehicle_model': vehicleModel,
+      'vehicle_color': vehicleColor,
+      'vehicle_plate': vehiclePlate,
       'offered_price': offeredPrice,
-      'eta_minutes': etaMinutes,
+      'estimated_arrival_min': etaMinutes,
       'status': status,
       'message': message,
       'created_at': createdAt.toIso8601String(),
@@ -60,15 +66,37 @@ class DriverOfferModel extends DriverOffer {
     };
   }
 
-  /// Create a new offer (driver side)
-  Map<String, dynamic> toCreateJson() {
+  /// Create a new offer (driver side) - includes denormalized driver data
+  static Map<String, dynamic> toCreateJson({
+    required String rideId,
+    required String driverId,
+    required String driverName,
+    String? driverPhone,
+    String? driverPhoto,
+    required double driverRating,
+    required int driverTotalRides,
+    required String vehicleModel,
+    String? vehicleColor,
+    required String vehiclePlate,
+    required double offeredPrice,
+    int? estimatedArrivalMin,
+    String? message,
+  }) {
     return {
       'ride_id': rideId,
       'driver_id': driverId,
+      'driver_name': driverName,
+      'driver_phone': driverPhone,
+      'driver_photo': driverPhoto,
+      'driver_rating': driverRating,
+      'driver_total_rides': driverTotalRides,
+      'vehicle_model': vehicleModel,
+      'vehicle_color': vehicleColor,
+      'vehicle_plate': vehiclePlate,
       'offered_price': offeredPrice,
-      'eta_minutes': etaMinutes,
-      'status': 'pending',
+      'estimated_arrival_min': estimatedArrivalMin,
       'message': message,
+      'status': 'pending',
     };
   }
 }

@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 import '../../features/driver/home/presentation/pages/driver_home_page.dart';
 import '../../features/driver/earnings/presentation/pages/earnings_page.dart';
-import '../../features/driver/trips/presentation/pages/trips_page.dart';
+import '../../features/driver/trips/presentation/pages/driver_rides_page.dart';
 import '../../features/driver/chat/presentation/pages/driver_chat_list_page.dart';
 import '../../features/driver/profile/presentation/pages/driver_profile_page.dart';
 
@@ -19,10 +19,10 @@ class DriverNavigation extends StatefulWidget {
 class _DriverNavigationState extends State<DriverNavigation> {
   int _currentIndex = 0;
 
-  // Driver pages
+  // Driver pages - using real data page instead of mock
   final List<Widget> _pages = const [
     DriverHomePage(),
-    DriverTripsPage(),
+    DriverRidesPage(),  // Changed from DriverTripsPage to use real Supabase data
     EarningsPage(),
     DriverChatListPage(),
     DriverProfilePage(),

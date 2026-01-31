@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
@@ -10,7 +11,10 @@ import '../../../../core/navigation/driver_navigation.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/domain/entities/user.dart' as app_user;
 import '../../../auth/presentation/pages/welcome_page.dart';
+import '../../../user/booking/presentation/bloc/booking_bloc.dart';
+import '../../../driver/rides/presentation/bloc/driver_rides_bloc.dart';
 import '../widgets/splash_logo_widget.dart';
+import '../../../../injection_container.dart' as di;
 
 class SplashPage extends StatefulWidget {
   const SplashPage({super.key});
@@ -121,15 +125,54 @@ class _SplashPageState extends State<SplashPage>
         if (mounted) {
           if (user.role == app_user.UserRole.driver) {
             print('Navigating to driver dashboard');
-            Navigator.pushReplacement(
-              context,
-              MaterialPageRoute(builder: (context) => const DriverNavigation()),
+            // Fetch driver profile from 'drivers' table
+            Map<String, dynamic>? driverProfile;
+            try {
+              driverProfile = await supabase
+                  .from('drivers')
+                  .select()
+                  .eq('id', currentUser.id)
+                  .maybeSingle();
+              print('Driver profile fetched: $driverProfile');
+            } catch (e) {
+              print('Error fetching driver profile: $e');
+              // Continue with null profile - will use defaults
+            }
+            
+            final driverParams = di.DriverBlocParams(
+              driverId: currentUser.id,
+              driverName: user.name,
+              driverPhone: user.phoneNumber,
+              driverPhoto: user.profileImage,
+              driverRating: (driverProfile?['rating'] as num?)?.toDouble() ?? 4.5,
+              driverTotalRides: driverProfile?['total_rides'] as int? ?? 0,
+              vehicleModel: driverProfile?['vehicle_model'] as String? ?? 'Unknown',
+              vehicleColor: driverProfile?['vehicle_color'] as String?,
+              vehiclePlate: driverProfile?['vehicle_plate'] as String? ?? 'Unknown',
             );
+            print('Driver params: name=${driverParams.driverName}, phone=${driverParams.driverPhone}');
+            
+            if (mounted) {
+              Navigator.pushReplacement(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => BlocProvider<DriverRidesBloc>(
+                    create: (_) => di.sl<DriverRidesBloc>(param1: driverParams),
+                    child: const DriverNavigation(),
+                  ),
+                ),
+              );
+            }
           } else {
             print('Navigating to user home');
             Navigator.pushReplacement(
               context,
-              MaterialPageRoute(builder: (context) => const MainNavigation()),
+              MaterialPageRoute(
+                builder: (context) => BlocProvider<BookingBloc>(
+                  create: (_) => di.sl<BookingBloc>(param1: currentUser.id),
+                  child: const MainNavigation(),
+                ),
+              ),
             );
           }
         }

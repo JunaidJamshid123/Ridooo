@@ -1,9 +1,12 @@
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:equatable/equatable.dart';
+import '../../../../../core/services/realtime_service.dart';
 import '../../domain/entities/ride.dart';
-import '../../domain/entities/driver_offer.dart';
+import '../../domain/entities/driver_offer.dart' as entities;
 import '../../domain/usecases/create_ride.dart';
-import '../../domain/usecases/ride_usecases.dart';
+import '../../domain/usecases/ride_usecases.dart' as usecases;
+import '../../domain/repositories/booking_repository.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 // ==================== EVENTS ====================
 
@@ -51,7 +54,7 @@ class RideUpdated extends BookingEvent {
 }
 
 class DriverOfferReceived extends BookingEvent {
-  final DriverOffer offer;
+  final entities.DriverOffer offer;
 
   DriverOfferReceived(this.offer);
 
@@ -70,6 +73,44 @@ class DriverLocationUpdated extends BookingEvent {
 }
 
 class LoadActiveRide extends BookingEvent {}
+
+class LoadRideOffers extends BookingEvent {
+  final String rideId;
+
+  LoadRideOffers({required this.rideId});
+
+  @override
+  List<Object?> get props => [rideId];
+}
+
+class ListenToRideOffers extends BookingEvent {
+  final String rideId;
+
+  ListenToRideOffers({required this.rideId});
+
+  @override
+  List<Object?> get props => [rideId];
+}
+
+class AcceptDriverOffer extends BookingEvent {
+  final String rideId;
+  final String offerId;
+
+  AcceptDriverOffer({required this.rideId, required this.offerId});
+
+  @override
+  List<Object?> get props => [rideId, offerId];
+}
+
+class RejectDriverOffer extends BookingEvent {
+  final String rideId;
+  final String offerId;
+
+  RejectDriverOffer({required this.rideId, required this.offerId});
+
+  @override
+  List<Object?> get props => [rideId, offerId];
+}
 
 class ResetBooking extends BookingEvent {}
 
@@ -95,7 +136,7 @@ class RideCreated extends BookingState {
 
 class SearchingForDrivers extends BookingState {
   final Ride ride;
-  final List<DriverOffer> offers;
+  final List<entities.DriverOffer> offers;
   final int viewingCount;
 
   SearchingForDrivers({
@@ -109,7 +150,7 @@ class SearchingForDrivers extends BookingState {
 
   SearchingForDrivers copyWith({
     Ride? ride,
-    List<DriverOffer>? offers,
+    List<entities.DriverOffer>? offers,
     int? viewingCount,
   }) {
     return SearchingForDrivers(
@@ -189,6 +230,28 @@ class RideCancelled extends BookingState {
   List<Object?> get props => [ride];
 }
 
+class OffersLoading extends BookingState {}
+
+class OffersLoaded extends BookingState {
+  final List<entities.DriverOffer> offers;
+
+  OffersLoaded(this.offers);
+
+  @override
+  List<Object?> get props => [offers];
+}
+
+class OfferAcceptedSuccessfully extends BookingState {
+  final Ride ride;
+
+  OfferAcceptedSuccessfully(this.ride);
+
+  @override
+  List<Object?> get props => [ride];
+}
+
+class OfferRejectedSuccessfully extends BookingState {}
+
 class BookingError extends BookingState {
   final String message;
 
@@ -202,15 +265,21 @@ class BookingError extends BookingState {
 
 class BookingBloc extends Bloc<BookingEvent, BookingState> {
   final CreateRide createRideUseCase;
-  final CancelRide cancelRideUseCase;
-  final AcceptDriverOffer acceptOfferUseCase;
-  final GetActiveRide getActiveRideUseCase;
+  final usecases.CancelRide cancelRideUseCase;
+  final usecases.AcceptDriverOffer acceptOfferUseCase;
+  final usecases.GetActiveRide getActiveRideUseCase;
+  final BookingRepository repository;
+  final RealtimeService realtimeService;
+
+  RealtimeChannel? _offersChannel;
 
   BookingBloc({
     required this.createRideUseCase,
     required this.cancelRideUseCase,
     required this.acceptOfferUseCase,
     required this.getActiveRideUseCase,
+    required this.repository,
+    required this.realtimeService,
   }) : super(BookingInitial()) {
     on<CreateRideRequested>(_onCreateRide);
     on<CancelRideRequested>(_onCancelRide);
@@ -219,7 +288,17 @@ class BookingBloc extends Bloc<BookingEvent, BookingState> {
     on<DriverOfferReceived>(_onDriverOfferReceived);
     on<DriverLocationUpdated>(_onDriverLocationUpdated);
     on<LoadActiveRide>(_onLoadActiveRide);
+    on<LoadRideOffers>(_onLoadRideOffers);
+    on<ListenToRideOffers>(_onListenToRideOffers);
+    on<AcceptDriverOffer>(_onAcceptDriverOffer);
+    on<RejectDriverOffer>(_onRejectDriverOffer);
     on<ResetBooking>(_onResetBooking);
+  }
+
+  @override
+  Future<void> close() {
+    _offersChannel?.unsubscribe();
+    return super.close();
   }
 
   Future<void> _onCreateRide(
@@ -235,7 +314,10 @@ class BookingBloc extends Bloc<BookingEvent, BookingState> {
       (ride) {
         emit(RideCreated(ride));
         emit(SearchingForDrivers(ride: ride));
-        // TODO: Start listening to ride updates and driver offers
+        // Start listening to driver offers for this ride
+        add(ListenToRideOffers(rideId: ride.id));
+        // Load any existing offers
+        add(LoadRideOffers(rideId: ride.id));
       },
     );
   }
@@ -355,6 +437,109 @@ class BookingBloc extends Bloc<BookingEvent, BookingState> {
     ResetBooking event,
     Emitter<BookingState> emit,
   ) {
+    _offersChannel?.unsubscribe();
+    _offersChannel = null;
     emit(BookingInitial());
+  }
+
+  Future<void> _onLoadRideOffers(
+    LoadRideOffers event,
+    Emitter<BookingState> emit,
+  ) async {
+    // Don't emit loading if already searching
+    if (state is! SearchingForDrivers) {
+      emit(OffersLoading());
+    }
+
+    final result = await repository.getDriverOffers(event.rideId);
+
+    result.fold(
+      (failure) => emit(BookingError(failure.message)),
+      (offers) {
+        if (state is SearchingForDrivers) {
+          // Update the SearchingForDrivers state with offers
+          emit((state as SearchingForDrivers).copyWith(offers: offers));
+        } else {
+          emit(OffersLoaded(offers));
+        }
+      },
+    );
+  }
+
+  Future<void> _onListenToRideOffers(
+    ListenToRideOffers event,
+    Emitter<BookingState> emit,
+  ) async {
+    // Unsubscribe from previous channel if exists
+    await _offersChannel?.unsubscribe();
+
+    _offersChannel = realtimeService.subscribeToDriverOffers(
+      rideId: event.rideId,
+      onNewOffer: (payload) async {
+        // Convert payload to DriverOffer
+        try {
+          // Reload all offers when a new one arrives
+          final result = await repository.getDriverOffers(event.rideId);
+          result.fold(
+            (failure) {
+              // Log error but don't emit error state for realtime updates
+            },
+            (offers) {
+              // Emit updated offers list to SearchingForDrivers state
+              if (state is SearchingForDrivers) {
+                final currentState = state as SearchingForDrivers;
+                add(RideUpdated(currentState.ride)); // Re-trigger state
+                // Update offers through event
+                for (final offer in offers) {
+                  if (!currentState.offers.any((o) => o.id == offer.id)) {
+                    add(DriverOfferReceived(offer));
+                  }
+                }
+              }
+            },
+          );
+        } catch (e) {
+          // Silently fail for realtime errors
+        }
+      },
+    );
+  }
+
+  Future<void> _onAcceptDriverOffer(
+    AcceptDriverOffer event,
+    Emitter<BookingState> emit,
+  ) async {
+    final result = await repository.acceptDriverOffer(
+      rideId: event.rideId,
+      offerId: event.offerId,
+    );
+
+    result.fold(
+      (failure) => emit(BookingError(failure.message)),
+      (ride) => emit(OfferAcceptedSuccessfully(ride)),
+    );
+  }
+
+  Future<void> _onRejectDriverOffer(
+    RejectDriverOffer event,
+    Emitter<BookingState> emit,
+  ) async {
+    final result = await repository.rejectDriverOffer(
+      rideId: event.rideId,
+      offerId: event.offerId,
+    );
+
+    result.fold(
+      (failure) => emit(BookingError(failure.message)),
+      (_) async {
+        emit(OfferRejectedSuccessfully());
+        // Reload offers to update the list
+        final offersResult = await repository.getDriverOffers(event.rideId);
+        offersResult.fold(
+          (failure) => emit(BookingError(failure.message)),
+          (offers) => emit(OffersLoaded(offers)),
+        );
+      },
+    );
   }
 }

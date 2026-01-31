@@ -1,5 +1,5 @@
 import 'package:dartz/dartz.dart';
-import '../../../../core/errors/failures.dart';
+import '../../../../../core/errors/failures.dart';
 import '../entities/ride.dart';
 import '../entities/driver_offer.dart';
 
@@ -38,6 +38,12 @@ abstract class BookingRepository {
 
   /// Accept a driver offer
   Future<Either<Failure, Ride>> acceptDriverOffer({
+    required String rideId,
+    required String offerId,
+  });
+
+  /// Reject a driver offer
+  Future<Either<Failure, void>> rejectDriverOffer({
     required String rideId,
     required String offerId,
   });

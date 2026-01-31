@@ -69,6 +69,22 @@ dependencies:
   
   # Environment Variables
   flutter_dotenv: ^5.1.0
+  
+  # Navigation
+  go_router: ^14.6.2
+  
+  # Notifications
+  firebase_messaging: ^15.1.5
+  flutter_local_notifications: ^18.0.1
+  
+  # Image Caching
+  cached_network_image: ^3.4.1
+  
+  # URL Launcher
+  url_launcher: ^6.3.1
+  
+  # Share
+  share_plus: ^10.0.0
 
 dev_dependencies:
   flutter_test:

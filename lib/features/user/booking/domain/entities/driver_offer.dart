@@ -6,6 +6,7 @@ class DriverOffer extends Equatable {
   final String rideId;
   final String driverId;
   final String driverName;
+  final String? driverPhone;
   final String? driverPhoto;
   final double driverRating;
   final int driverTotalRides;
@@ -24,6 +25,7 @@ class DriverOffer extends Equatable {
     required this.rideId,
     required this.driverId,
     required this.driverName,
+    this.driverPhone,
     this.driverPhoto,
     required this.driverRating,
     required this.driverTotalRides,
@@ -40,6 +42,10 @@ class DriverOffer extends Equatable {
 
   bool get isPending => status == 'pending';
   bool get isExpired => DateTime.now().isAfter(expiresAt) || status == 'expired';
+
+  // Compatibility getters for UI
+  String? get driverPhotoUrl => driverPhoto;
+  int? get estimatedArrivalMin => etaMinutes;
 
   @override
   List<Object?> get props => [id, rideId, driverId, status];

@@ -1,12 +1,19 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/services/location_service.dart';
 import '../../../../core/services/directions_service.dart';
 import '../../../../core/services/places_service.dart';
+import '../../../user/booking/presentation/bloc/booking_bloc.dart';
+import '../../../user/booking/domain/entities/ride.dart';
+import '../../../user/booking/domain/entities/driver_offer.dart';
+import '../../../user/booking/domain/usecases/create_ride.dart';
+import '../../../user/booking/presentation/pages/incoming_offers_page.dart';
+import '../../../user/booking/presentation/pages/user_ride_tracking_page.dart';
 import '../widgets/location_search_dialog.dart';
 import '../widgets/ripple_painter.dart';
 import '../widgets/driver_offer_card.dart';
@@ -54,7 +61,12 @@ class _HomePageState extends State<HomePage>
   bool _useCustomPrice = false;
   double? _customPrice;
 
-  // Driver Offers
+  // Real-time ride and offers
+  Ride? _currentRide;
+  List<DriverOffer> _realDriverOffers = [];
+  DriverOffer? _lastAcceptedOffer;
+  
+  // Legacy driver offers (for backwards compatibility during transition)
   List<Map<String, dynamic>> _driverOffers = [];
   Timer? _offerTimer;
   int _currentOfferTimeLeft = 10;
@@ -302,14 +314,75 @@ class _HomePageState extends State<HomePage>
     );
   }
 
+  /// Create a real ride request using BookingBloc
   Future<void> _searchForDriver() async {
+    if (_pickupLocation == null || _destinationLocation == null || _currentRoute == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Please select pickup and destination')),
+      );
+      return;
+    }
+
     setState(() {
       _isSearchingDriver = true;
       _searchAnimationProgress = 0.0;
       _driversViewing = 0;
       _driverOffers.clear();
+      _realDriverOffers.clear();
     });
 
+    // Calculate fare
+    final fare = _currentRoute?.calculateFare() ?? 0.0;
+    final selectedRide = _rideTypes.firstWhere(
+      (r) => r['name'] == _selectedRideType,
+    );
+    final calculatedPrice = (fare * (selectedRide['price'] / 18.0));
+    final finalPrice = _useCustomPrice && _customPrice != null 
+        ? _customPrice! 
+        : calculatedPrice;
+
+    // Map ride type name to vehicle type
+    String vehicleType;
+    switch (_selectedRideType) {
+      case 'Economy':
+        vehicleType = 'economy';
+        break;
+      case 'Standard':
+        vehicleType = 'standard';
+        break;
+      case 'Premium':
+        vehicleType = 'premium';
+        break;
+      case 'XL':
+        vehicleType = 'xl';
+        break;
+      default:
+        vehicleType = 'standard';
+    }
+
+    // Create ride request using BLoC
+    context.read<BookingBloc>().add(
+      CreateRideRequested(
+        CreateRideParams(
+          pickupLat: _pickupLocation!.location.latitude,
+          pickupLng: _pickupLocation!.location.longitude,
+          pickupAddress: _pickupLocation!.formattedAddress,
+          dropoffLat: _destinationLocation!.location.latitude,
+          dropoffLng: _destinationLocation!.location.longitude,
+          dropoffAddress: _destinationLocation!.formattedAddress,
+          vehicleType: vehicleType,
+          estimatedFare: calculatedPrice,
+          offeredPrice: _useCustomPrice ? _customPrice : null,
+          distanceKm: (double.tryParse(_currentRoute!.distanceValue) ?? 0) / 1000.0,
+          estimatedDurationMinutes: ((double.tryParse(_currentRoute!.durationValue) ?? 0) / 60).round(),
+          paymentMethod: 'cash', // Default to cash, can be changed
+        ),
+      ),
+    );
+  }
+
+  /// Legacy method for simulating offers (kept for fallback)
+  void _simulateDriverSearch() async {
     // Simulate drivers viewing the request
     for (int i = 0; i <= 10; i++) {
       if (!_isSearchingDriver) break;
@@ -388,15 +461,46 @@ class _HomePageState extends State<HomePage>
   }
 
   void _acceptDriverOffer(Map<String, dynamic> offer) {
-    setState(() {
-      _isSearchingDriver = false;
-      _driverOffers.clear();
-    });
-
-    _showDriverFoundDialog(offer['price']);
+    // Check if this is a real offer with backend integration
+    if (offer.containsKey('realOffer') && _currentRide != null) {
+      final realOffer = offer['realOffer'] as DriverOffer;
+      
+      // Store the accepted offer for navigation
+      _lastAcceptedOffer = realOffer;
+      
+      // Accept the offer using BLoC
+      context.read<BookingBloc>().add(
+        AcceptDriverOffer(
+          rideId: _currentRide!.id,
+          offerId: realOffer.id,
+        ),
+      );
+    } else {
+      // Legacy behavior for simulated offers
+      setState(() {
+        _isSearchingDriver = false;
+        _driverOffers.clear();
+      });
+      _showDriverFoundDialog(offer['price']);
+    }
   }
 
   void _declineDriverOffer(int index) {
+    final offer = _driverOffers[index];
+    
+    // Check if this is a real offer
+    if (offer.containsKey('realOffer') && _currentRide != null) {
+      final realOffer = offer['realOffer'] as DriverOffer;
+      
+      // Reject the offer using BLoC
+      context.read<BookingBloc>().add(
+        RejectDriverOffer(
+          rideId: _currentRide!.id,
+          offerId: realOffer.id,
+        ),
+      );
+    }
+    
     setState(() {
       _driverOffers.removeAt(index);
     });
@@ -746,47 +850,135 @@ class _HomePageState extends State<HomePage>
   @override
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
-    return Scaffold(
-      backgroundColor: const Color(0xFFF5F5F5),
-      body: Stack(
-        children: [
-          // Google Map - Enhanced Configuration
-          Positioned.fill(
-            child: RepaintBoundary(
-              child: GoogleMap(
-                onMapCreated: _onMapCreated,
-                initialCameraPosition: CameraPosition(
-                  target: _currentPosition,
-                  zoom: 15.5,
-                  tilt: 0,
-                ),
-                myLocationEnabled: !_showRideOptions && !_isSearchingDriver,
-                myLocationButtonEnabled: false,
-                zoomControlsEnabled: false,
-                mapToolbarEnabled: false,
-                compassEnabled: false,
-                rotateGesturesEnabled: true,
-                tiltGesturesEnabled: false,
-                scrollGesturesEnabled: true,
-                zoomGesturesEnabled: true,
-                buildingsEnabled: true,
-                indoorViewEnabled: false,
-                trafficEnabled: false,
-                liteModeEnabled: false,
-                markers: _markers,
-                polylines: _polylines,
-                padding: EdgeInsets.only(
-                  top: MediaQuery.of(context).padding.top + 80,
-                  bottom: _showRideOptions ? 450 : 350,
-                ),
-                minMaxZoomPreference: const MinMaxZoomPreference(10, 20),
+    return BlocListener<BookingBloc, BookingState>(
+      listener: (context, state) {
+        if (state is RideCreated) {
+          // Ride created successfully, start listening for offers
+          _currentRide = state.ride;
+          context.read<BookingBloc>().add(
+            ListenToRideOffers(rideId: state.ride.id),
+          );
+          context.read<BookingBloc>().add(
+            LoadRideOffers(rideId: state.ride.id),
+          );
+          
+          // Update UI to show searching
+          setState(() {
+            _searchAnimationProgress = 0.5;
+            _driversViewing = 1;
+          });
+        } else if (state is SearchingForDrivers) {
+          // Update with real offers
+          setState(() {
+            _realDriverOffers = state.offers;
+            _driversViewing = state.viewingCount > 0 ? state.viewingCount : _driversViewing;
+            
+            // Convert real offers to legacy format for UI compatibility
+            _driverOffers = state.offers.map((offer) => {
+              'id': offer.id,
+              'driverName': offer.driverName,
+              'carModel': offer.vehicleModel,
+              'rating': offer.driverRating,
+              'price': offer.offeredPrice,
+              'eta': '${offer.estimatedArrivalMin ?? 5} min',
+              'timeLeft': offer.expiresAt.difference(DateTime.now()).inSeconds.clamp(0, 300),
+              'realOffer': offer,
+            }).toList();
+          });
+        } else if (state is OffersLoaded) {
+          // Update with loaded offers
+          setState(() {
+            _realDriverOffers = state.offers;
+            
+            // Convert to legacy format
+            _driverOffers = state.offers.map((offer) => {
+              'id': offer.id,
+              'driverName': offer.driverName,
+              'carModel': offer.vehicleModel,
+              'rating': offer.driverRating,
+              'price': offer.offeredPrice,
+              'eta': '${offer.estimatedArrivalMin ?? 5} min',
+              'timeLeft': offer.expiresAt.difference(DateTime.now()).inSeconds.clamp(0, 300),
+              'realOffer': offer,
+            }).toList();
+          });
+          
+          if (state.offers.isNotEmpty) {
+            setState(() {
+              _searchAnimationProgress = 1.0;
+            });
+          }
+        } else if (state is OfferAcceptedSuccessfully) {
+          // Navigate to ride tracking
+          setState(() {
+            _isSearchingDriver = false;
+            _driverOffers.clear();
+            _realDriverOffers.clear();
+          });
+          
+          // Navigate to ride tracking page
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => UserRideTrackingPage(
+                ride: state.ride,
+                acceptedOffer: _lastAcceptedOffer,
               ),
             ),
-          ),
-
-          // Ripple Animation on Map (InDrive style)
-          if (_isSearchingDriver && _pickupLocation != null)
+          );
+        } else if (state is BookingError) {
+          setState(() {
+            _isSearchingDriver = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(state.message),
+              backgroundColor: Colors.red,
+            ),
+          );
+        }
+      },
+      child: Scaffold(
+        backgroundColor: const Color(0xFFF5F5F5),
+        body: Stack(
+          children: [
+            // Google Map - Enhanced Configuration
             Positioned.fill(
+              child: RepaintBoundary(
+                child: GoogleMap(
+                  onMapCreated: _onMapCreated,
+                  initialCameraPosition: CameraPosition(
+                    target: _currentPosition,
+                    zoom: 15.5,
+                    tilt: 0,
+                  ),
+                  myLocationEnabled: !_showRideOptions && !_isSearchingDriver,
+                  myLocationButtonEnabled: false,
+                  zoomControlsEnabled: false,
+                  mapToolbarEnabled: false,
+                  compassEnabled: false,
+                  rotateGesturesEnabled: true,
+                  tiltGesturesEnabled: false,
+                  scrollGesturesEnabled: true,
+                  zoomGesturesEnabled: true,
+                  buildingsEnabled: true,
+                  indoorViewEnabled: false,
+                  trafficEnabled: false,
+                  liteModeEnabled: false,
+                  markers: _markers,
+                  polylines: _polylines,
+                  padding: EdgeInsets.only(
+                    top: MediaQuery.of(context).padding.top + 80,
+                    bottom: _showRideOptions ? 450 : 350,
+                  ),
+                  minMaxZoomPreference: const MinMaxZoomPreference(10, 20),
+                ),
+              ),
+            ),
+
+            // Ripple Animation on Map (InDrive style)
+            if (_isSearchingDriver && _pickupLocation != null)
+              Positioned.fill(
               child: AnimatedBuilder(
                 animation: _rippleController!,
                 builder: (context, child) {
@@ -1127,7 +1319,8 @@ class _HomePageState extends State<HomePage>
                 ),
               ),
             ),
-        ],
+          ],
+        ),
       ),
     );
   }

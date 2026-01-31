@@ -1,4 +1,5 @@
 import '../models/user_model.dart';
+import '../../domain/entities/user.dart';
 
 abstract class AuthRemoteDataSource {
   Future<UserModel> login({
@@ -41,6 +42,7 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
       name: 'John Doe',
       email: 'john@example.com',
       phoneNumber: '+1234567890',
+      role: UserRole.user,
     );
   }
 
@@ -58,6 +60,7 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
       name: name,
       email: email,
       phoneNumber: phoneNumber,
+      role: UserRole.user,
     );
   }
 
@@ -76,6 +79,7 @@ class AuthRemoteDataSourceImpl implements AuthRemoteDataSource {
       name: 'John Doe',
       email: 'john@example.com',
       phoneNumber: '+1234567890',
+      role: UserRole.user,
     );
   }
 }
