@@ -112,8 +112,10 @@ class _UserChatListPageState extends State<UserChatListPage> {
               context,
               MaterialPageRoute(
                 builder: (context) => ChatScreenPage(
-                  driverName: conversation.driverName,
-                  driverImage: conversation.driverImage,
+                  recipientId: conversation.driverId ?? '',
+                  recipientName: conversation.driverName,
+                  recipientImage: conversation.driverImage,
+                  rideId: conversation.rideId,
                   isOnline: conversation.isOnline,
                 ),
               ),
@@ -305,6 +307,8 @@ class _UserChatListPageState extends State<UserChatListPage> {
 // Chat Conversation Model
 class ChatConversation {
   final String id;
+  final String? driverId;
+  final String? rideId;
   final String driverName;
   final String? driverImage;
   final String lastMessage;
@@ -314,6 +318,8 @@ class ChatConversation {
 
   ChatConversation({
     required this.id,
+    this.driverId,
+    this.rideId,
     required this.driverName,
     this.driverImage,
     required this.lastMessage,

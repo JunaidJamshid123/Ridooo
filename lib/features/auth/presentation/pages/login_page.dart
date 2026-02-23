@@ -4,7 +4,6 @@ import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/navigation/main_navigation.dart';
 import '../../../../core/navigation/driver_navigation.dart';
-import '../../../../core/config/supabase_config.dart';
 import '../../../../injection_container.dart' as di;
 import '../../../user/booking/presentation/bloc/booking_bloc.dart';
 import '../../../driver/rides/presentation/bloc/driver_rides_bloc.dart';
@@ -74,7 +73,7 @@ class _LoginPageState extends State<LoginPage> {
             }
             
             if (user.role == UserRole.driver) {
-              // Fetch driver profile from 'drivers' table
+              // Fetch or create driver profile from 'drivers' table
               Map<String, dynamic>? driverProfile;
               try {
                 driverProfile = await supabase
@@ -83,8 +82,26 @@ class _LoginPageState extends State<LoginPage> {
                     .eq('id', currentUser.id)
                     .maybeSingle();
                 debugPrint('Driver profile fetched: $driverProfile');
+                
+                // Create driver profile if it doesn't exist (edge case handling)
+                if (driverProfile == null) {
+                  debugPrint('Driver profile not found, creating one...');
+                  final newProfile = {
+                    'id': currentUser.id,
+                    'license_number': user.licenseNumber ?? 'PENDING',
+                    'vehicle_model': user.vehicleModel ?? 'Unknown',
+                    'vehicle_plate': user.vehiclePlate ?? 'Unknown',
+                    'is_available': true,
+                    'rating': 5.0,
+                    'total_rides': 0,
+                  };
+                  await supabase.from('drivers').insert(newProfile);
+                  driverProfile = newProfile;
+                  debugPrint('Driver profile created successfully');
+                }
               } catch (e) {
-                debugPrint('Error fetching driver profile: $e');
+                debugPrint('Error with driver profile: $e');
+                // Continue with defaults if profile operations fail
               }
               
               final driverParams = di.DriverBlocParams(

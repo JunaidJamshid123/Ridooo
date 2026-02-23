@@ -12,7 +12,6 @@ import '../../../user/booking/presentation/bloc/booking_bloc.dart';
 import '../../../user/booking/domain/entities/ride.dart';
 import '../../../user/booking/domain/entities/driver_offer.dart';
 import '../../../user/booking/domain/usecases/create_ride.dart';
-import '../../../user/booking/presentation/pages/incoming_offers_page.dart';
 import '../../../user/booking/presentation/pages/user_ride_tracking_page.dart';
 import '../widgets/location_search_dialog.dart';
 import '../widgets/ripple_painter.dart';

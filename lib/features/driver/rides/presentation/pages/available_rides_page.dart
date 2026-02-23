@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:geolocator/geolocator.dart';
 import '../../../../../core/widgets/custom_button.dart';
 import '../../../../user/booking/domain/entities/ride.dart';
 import '../bloc/driver_rides_bloc.dart';
@@ -20,28 +21,84 @@ class AvailableRidesPage extends StatefulWidget {
 class _AvailableRidesPageState extends State<AvailableRidesPage> {
   bool _isOnline = false;
   Timer? _refreshTimer;
+  StreamSubscription<Position>? _positionStream;
   
-  // TODO: Get actual location from GPS
+  // Real GPS location
   double _currentLat = 31.5204;
   double _currentLng = 74.3587;
+  bool _locationLoaded = false;
 
   @override
   void initState() {
     super.initState();
+    _initLocation();
     // Start listening for new rides
     context.read<DriverRidesBloc>().add(const ListenToNewRides());
     context.read<DriverRidesBloc>().add(const ListenToOfferStatus());
-    
-    // Load nearby rides
-    _loadNearbyRides();
-    
-    // Auto-refresh every 30 seconds when online
-    _startAutoRefresh();
+  }
+
+  Future<void> _initLocation() async {
+    try {
+      // Check permissions
+      LocationPermission permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+      
+      if (permission == LocationPermission.deniedForever) {
+        debugPrint('Location permissions permanently denied');
+        _loadNearbyRides(); // Use default location
+        return;
+      }
+
+      // Get current position
+      final position = await Geolocator.getCurrentPosition(
+        desiredAccuracy: LocationAccuracy.high,
+      );
+      
+      setState(() {
+        _currentLat = position.latitude;
+        _currentLng = position.longitude;
+        _locationLoaded = true;
+      });
+      
+      _loadNearbyRides();
+      
+      // Start continuous location updates
+      _startLocationUpdates();
+    } catch (e) {
+      debugPrint('Error getting location: $e');
+      _loadNearbyRides(); // Use default location
+    }
+  }
+
+  void _startLocationUpdates() {
+    _positionStream?.cancel();
+    _positionStream = Geolocator.getPositionStream(
+      locationSettings: const LocationSettings(
+        accuracy: LocationAccuracy.high,
+        distanceFilter: 50, // Update every 50 meters
+      ),
+    ).listen((Position position) {
+      setState(() {
+        _currentLat = position.latitude;
+        _currentLng = position.longitude;
+      });
+      
+      // Update driver location in Supabase if online
+      if (_isOnline) {
+        context.read<DriverRidesBloc>().add(UpdateDriverLocation(
+          latitude: _currentLat,
+          longitude: _currentLng,
+          isOnline: true,
+        ));
+      }
+    });
   }
   
   void _startAutoRefresh() {
     _refreshTimer?.cancel();
-    _refreshTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+    _refreshTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       if (_isOnline && mounted) {
         context.read<DriverRidesBloc>().add(RefreshRides(
           latitude: _currentLat,
@@ -55,7 +112,7 @@ class _AvailableRidesPageState extends State<AvailableRidesPage> {
     context.read<DriverRidesBloc>().add(LoadNearbyRideRequests(
       latitude: _currentLat,
       longitude: _currentLng,
-      radiusKm: 10,
+      radiusKm: 15,
     ));
   }
 
@@ -78,6 +135,13 @@ class _AvailableRidesPageState extends State<AvailableRidesPage> {
       // Stop refresh when offline
       _refreshTimer?.cancel();
     }
+  }
+
+  @override
+  void dispose() {
+    _refreshTimer?.cancel();
+    _positionStream?.cancel();
+    super.dispose();
   }
 
   void _showCreateOfferSheet(Ride ride) {
@@ -330,12 +394,5 @@ class _AvailableRidesPageState extends State<AvailableRidesPage> {
         ),
       ),
     );
-  }
-
-  @override
-  void dispose() {
-    _refreshTimer?.cancel();
-    context.read<DriverRidesBloc>().add(const StopListening());
-    super.dispose();
   }
 }

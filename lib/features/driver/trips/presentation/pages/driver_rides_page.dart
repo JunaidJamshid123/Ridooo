@@ -25,13 +25,62 @@ class _DriverRidesPageState extends State<DriverRidesPage>
   late TabController _tabController;
   final Map<String, Timer> _offerTimers = {};
   
-  // Completed rides history (could be fetched from Supabase too)
-  final List<Map<String, dynamic>> _completedRides = [];
+  String? _driverName;
+  String? _driverPhone;
+  String? _driverPhoto;
+  double _driverRating = 4.5;
+  int _driverTotalRides = 0;
+  String _vehicleModel = 'Unknown';
+  String? _vehicleColor;
+  String _vehiclePlate = 'Unknown';
+  bool _isLoading = true;
 
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _loadDriverProfile();
+  }
+
+  Future<void> _loadDriverProfile() async {
+    try {
+      final supabase = Supabase.instance.client;
+      final currentUser = supabase.auth.currentUser;
+      if (currentUser == null) return;
+
+      // Fetch user data
+      final userData = await supabase
+          .from('users')
+          .select('name, phone_number, profile_image')
+          .eq('id', currentUser.id)
+          .maybeSingle();
+
+      // Fetch driver profile
+      final driverData = await supabase
+          .from('drivers')
+          .select()
+          .eq('id', currentUser.id)
+          .maybeSingle();
+
+      if (mounted) {
+        setState(() {
+          _driverName = userData?['name'] as String? ?? 'Driver';
+          _driverPhone = userData?['phone_number'] as String?;
+          _driverPhoto = userData?['profile_image'] as String?;
+          _driverRating = (driverData?['rating'] as num?)?.toDouble() ?? 4.5;
+          _driverTotalRides = driverData?['total_rides'] as int? ?? 0;
+          _vehicleModel = driverData?['vehicle_model'] as String? ?? 'Unknown';
+          _vehicleColor = driverData?['vehicle_color'] as String?;
+          _vehiclePlate = driverData?['vehicle_plate'] as String? ?? 'Unknown';
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading driver profile: $e');
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
   }
 
   @override
@@ -54,24 +103,29 @@ class _DriverRidesPageState extends State<DriverRidesPage>
       );
     }
 
-    // Create the bloc with driver info
+    if (_isLoading) {
+      return const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      );
+    }
+
+    // Create the bloc with fetched driver info
     return BlocProvider(
       create: (context) => sl<DriverRidesBloc>(
         param1: DriverBlocParams(
           driverId: currentUser.id,
-          driverName: currentUser.userMetadata?['name'] ?? 'Driver',
-          driverPhone: currentUser.phone,
-          driverPhoto: currentUser.userMetadata?['profile_image'],
-          driverRating: 4.8,
-          driverTotalRides: 0,
-          vehicleModel: currentUser.userMetadata?['vehicle_model'] ?? 'Unknown',
-          vehicleColor: currentUser.userMetadata?['vehicle_color'],
-          vehiclePlate: currentUser.userMetadata?['vehicle_plate'] ?? 'Unknown',
+          driverName: _driverName ?? 'Driver',
+          driverPhone: _driverPhone,
+          driverPhoto: _driverPhoto,
+          driverRating: _driverRating,
+          driverTotalRides: _driverTotalRides,
+          vehicleModel: _vehicleModel,
+          vehicleColor: _vehicleColor,
+          vehiclePlate: _vehiclePlate,
         ),
       ),
       child: _DriverRidesContent(
         tabController: _tabController,
-        completedRides: _completedRides,
       ),
     );
   }
@@ -79,11 +133,9 @@ class _DriverRidesPageState extends State<DriverRidesPage>
 
 class _DriverRidesContent extends StatefulWidget {
   final TabController tabController;
-  final List<Map<String, dynamic>> completedRides;
 
   const _DriverRidesContent({
     required this.tabController,
-    required this.completedRides,
   });
 
   @override
@@ -710,38 +762,7 @@ class _DriverRidesContentState extends State<_DriverRidesContent> {
   }
 
   Widget _buildHistoryTab() {
-    if (widget.completedRides.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(
-              Icons.history,
-              size: 80,
-              color: Colors.grey.shade400,
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'No completed rides yet',
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-                color: Colors.grey.shade600,
-              ),
-            ),
-          ],
-        ),
-      );
-    }
-
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: widget.completedRides.length,
-      itemBuilder: (context, index) {
-        final ride = widget.completedRides[index];
-        return _buildCompletedRideCard(ride);
-      },
-    );
+    return _DriverHistoryTab();
   }
 
   Widget _buildCompletedRideCard(Map<String, dynamic> ride) {
@@ -808,6 +829,308 @@ class _DriverRidesContentState extends State<_DriverRidesContent> {
                 style: const TextStyle(
                   fontWeight: FontWeight.bold,
                   color: Colors.green,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// Driver History Tab - Loads completed rides from Supabase
+class _DriverHistoryTab extends StatefulWidget {
+  @override
+  State<_DriverHistoryTab> createState() => _DriverHistoryTabState();
+}
+
+class _DriverHistoryTabState extends State<_DriverHistoryTab> {
+  final _supabase = Supabase.instance.client;
+  List<Map<String, dynamic>> _completedRides = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadCompletedRides();
+  }
+
+  Future<void> _loadCompletedRides() async {
+    try {
+      final driverId = _supabase.auth.currentUser?.id;
+      if (driverId == null) {
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      // Get completed rides where driver had accepted offers
+      final response = await _supabase
+          .from('driver_offers')
+          .select('''
+            id,
+            offered_price,
+            status,
+            ride:ride_id(
+              id,
+              status,
+              pickup_address,
+              dropoff_address,
+              distance_km,
+              estimated_duration_minutes,
+              final_fare,
+              created_at,
+              completed_at,
+              user:user_id(name, phone_number, profile_image)
+            )
+          ''')
+          .eq('driver_id', driverId)
+          .eq('status', 'accepted')
+          .order('created_at', ascending: false)
+          .limit(50);
+
+      final List<Map<String, dynamic>> rides = [];
+
+      for (final offer in response as List) {
+        final ride = offer['ride'];
+        if (ride == null) continue;
+        
+        final status = ride['status'] as String?;
+        if (status != 'completed' && status != 'cancelled') continue;
+
+        final user = ride['user'];
+        final userName = user?['name'] as String? ?? 'Passenger';
+        final pickup = _shortenAddress(ride['pickup_address'] as String? ?? '');
+        final dropoff = _shortenAddress(ride['dropoff_address'] as String? ?? '');
+        final distance = ride['distance_km'] as num? ?? 0;
+        final duration = ride['estimated_duration_minutes'] as num? ?? 0;
+        final fare = (ride['final_fare'] ?? offer['offered_price']) as num? ?? 0;
+
+        String date = 'Unknown';
+        if (ride['completed_at'] != null) {
+          date = _formatDate(DateTime.parse(ride['completed_at'] as String));
+        } else if (ride['created_at'] != null) {
+          date = _formatDate(DateTime.parse(ride['created_at'] as String));
+        }
+
+        rides.add({
+          'id': ride['id'],
+          'status': status,
+          'userName': userName,
+          'pickup': pickup,
+          'destination': dropoff,
+          'distance': '${distance.toStringAsFixed(1)} km',
+          'duration': '$duration min',
+          'driverEarnings': fare.toDouble(),
+          'date': date,
+        });
+      }
+
+      setState(() {
+        _completedRides = rides;
+        _isLoading = false;
+      });
+    } catch (e) {
+      debugPrint('Error loading history: $e');
+      setState(() => _isLoading = false);
+    }
+  }
+
+  String _shortenAddress(String address) {
+    final parts = address.split(',');
+    return parts.isNotEmpty ? parts.first.trim() : address;
+  }
+
+  String _formatDate(DateTime date) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final rideDate = DateTime(date.year, date.month, date.day);
+
+    if (rideDate == today) {
+      return 'Today';
+    } else if (rideDate == yesterday) {
+      return 'Yesterday';
+    } else {
+      return '${date.day}/${date.month}/${date.year}';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    if (_completedRides.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.history,
+              size: 80,
+              color: Colors.grey.shade400,
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'No completed rides yet',
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.grey.shade600,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Your ride history will appear here',
+              style: TextStyle(
+                color: Colors.grey.shade500,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return RefreshIndicator(
+      onRefresh: _loadCompletedRides,
+      child: ListView.builder(
+        padding: const EdgeInsets.all(16),
+        itemCount: _completedRides.length,
+        itemBuilder: (context, index) {
+          final ride = _completedRides[index];
+          return _buildHistoryCard(ride);
+        },
+      ),
+    );
+  }
+
+  Widget _buildHistoryCard(Map<String, dynamic> ride) {
+    final isCompleted = ride['status'] == 'completed';
+    
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.05),
+            blurRadius: 10,
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                ride['date'] ?? '',
+                style: TextStyle(
+                  color: Colors.grey.shade600,
+                  fontSize: 12,
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: isCompleted ? Colors.green.shade100 : Colors.red.shade100,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text(
+                  isCompleted ? 'Completed' : 'Cancelled',
+                  style: TextStyle(
+                    color: isCompleted ? Colors.green.shade700 : Colors.red.shade700,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Text(
+            ride['userName'] ?? '',
+            style: const TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: 16,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: const BoxDecoration(
+                  color: Colors.green,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  ride['pickup'] ?? '',
+                  style: TextStyle(color: Colors.grey.shade700),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            children: [
+              Container(
+                width: 8,
+                height: 8,
+                decoration: const BoxDecoration(
+                  color: Colors.red,
+                  shape: BoxShape.circle,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  ride['destination'] ?? '',
+                  style: TextStyle(color: Colors.grey.shade700),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  Icon(Icons.straighten, size: 16, color: Colors.grey.shade600),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${ride['distance']}',
+                    style: TextStyle(color: Colors.grey.shade600),
+                  ),
+                  const SizedBox(width: 16),
+                  Icon(Icons.access_time, size: 16, color: Colors.grey.shade600),
+                  const SizedBox(width: 4),
+                  Text(
+                    '${ride['duration']}',
+                    style: TextStyle(color: Colors.grey.shade600),
+                  ),
+                ],
+              ),
+              Text(
+                'Rs. ${ride['driverEarnings']?.toStringAsFixed(0) ?? '0'}',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                  color: isCompleted ? Colors.green : Colors.grey,
                 ),
               ),
             ],

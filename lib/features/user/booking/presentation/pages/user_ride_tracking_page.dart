@@ -6,12 +6,16 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:share_plus/share_plus.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../../../core/theme/app_colors.dart';
 import '../../../../../core/services/realtime_service.dart';
+import '../../../../../core/services/directions_service.dart';
 import '../../../../../injection_container.dart' as di;
+import '../../../chat/presentation/pages/chat_screen_page.dart';
 import '../../domain/entities/ride.dart';
 import '../../domain/entities/driver_offer.dart';
 import '../bloc/booking_bloc.dart';
+import 'ride_summary_page.dart';
 
 /// Enhanced Ride Tracking Page for User - Phase 2: Driver En Route to Pickup
 class UserRideTrackingPage extends StatefulWidget {
@@ -34,6 +38,12 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
   StreamSubscription? _driverLocationSubscription;
   Timer? _etaCountdownTimer;
   Timer? _pulseTimer;
+  Timer? _routeUpdateTimer;
+  Timer? _rideStatusPollTimer;  // Fallback polling for ride status
+
+  // Directions service for real routes
+  final DirectionsService _directionsService = DirectionsService();
+  final _supabase = Supabase.instance.client;
 
   Set<Marker> _markers = {};
   Set<Polyline> _polylines = {};
@@ -46,6 +56,11 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
   int _etaSeconds = 0;
   double _distanceToPickup = 0;
   double _pulseRadius = 0;
+
+  // Route points for accurate road display
+  List<LatLng>? _driverToPickupRoute;
+  List<LatLng>? _pickupToDropoffRoute;
+  bool _isLoadingRoute = false;
 
   late Ride _currentRide;
   late AnimationController _pulseAnimationController;
@@ -93,6 +108,8 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
     _subscribeToDriverLocation();
     _subscribeToRideUpdates();
     _startEtaCountdown();
+    _startRideStatusPolling();  // Fallback polling
+    _loadRoutes(); // Load accurate road routes
   }
 
   @override
@@ -100,10 +117,137 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
     _driverLocationSubscription?.cancel();
     _etaCountdownTimer?.cancel();
     _pulseTimer?.cancel();
+    _routeUpdateTimer?.cancel();
+    _rideStatusPollTimer?.cancel();
     _pulseAnimationController.dispose();
     _slideController.dispose();
     _mapController?.dispose();
     super.dispose();
+  }
+
+  /// Start polling ride status as fallback
+  void _startRideStatusPolling() {
+    _rideStatusPollTimer = Timer.periodic(const Duration(seconds: 5), (_) => _pollRideStatus());
+  }
+
+  /// Poll ride status from Supabase
+  Future<void> _pollRideStatus() async {
+    try {
+      final response = await _supabase
+          .from('rides')
+          .select('status, otp')
+          .eq('id', _currentRide.id)
+          .single();
+
+      final status = response['status'] as String?;
+      final otp = response['otp'] as String?;
+
+      if (!mounted) return;
+
+      // Only process if status changed
+      if (status != _currentRide.status) {
+        if (status == 'arrived') {
+          setState(() {
+            _currentRide = _currentRide.copyWith(status: 'arrived', otp: otp);
+            _rideStages[2].isCompleted = true;
+          });
+          _showDriverArrivedDialog();
+          HapticFeedback.heavyImpact();
+        } else if (status == 'in_progress') {
+          setState(() {
+            _currentRide = _currentRide.copyWith(status: 'in_progress');
+            _rideStages[3].isCompleted = true;
+          });
+          HapticFeedback.mediumImpact();
+        } else if (status == 'completed') {
+          _rideStatusPollTimer?.cancel();  // Stop polling
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(
+              builder: (context) => RideSummaryPage(
+                ride: _currentRide.copyWith(status: 'completed'),
+                offer: widget.acceptedOffer,
+              ),
+            ),
+          );
+        } else if (status == 'cancelled') {
+          _rideStatusPollTimer?.cancel();  // Stop polling
+          _showRideCancelledDialog();
+        }
+      }
+    } catch (e) {
+      debugPrint('Error polling ride status: $e');
+    }
+  }
+
+  /// Load accurate routes from Google Directions API
+  Future<void> _loadRoutes() async {
+    setState(() => _isLoadingRoute = true);
+
+    try {
+      // Load pickup to dropoff route
+      final pickupToDropoff = await _directionsService.getDirections(
+        origin: LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
+        destination: LatLng(
+          widget.ride.dropoffLatitude,
+          widget.ride.dropoffLongitude,
+        ),
+        optimizeRoute: true,
+      );
+
+      if (pickupToDropoff != null) {
+        _pickupToDropoffRoute = pickupToDropoff.polylinePoints;
+      }
+
+      // Load driver to pickup route if driver location is available
+      if (_driverLatitude != null && _driverLongitude != null) {
+        await _loadDriverToPickupRoute();
+      }
+    } catch (e) {
+      debugPrint('Error loading routes: $e');
+    }
+
+    if (mounted) {
+      setState(() {
+        _isLoadingRoute = false;
+        _updateMarkers();
+      });
+      _fitBounds();
+    }
+  }
+
+  /// Load route from driver to pickup location
+  Future<void> _loadDriverToPickupRoute() async {
+    if (_driverLatitude == null || _driverLongitude == null) return;
+
+    try {
+      final driverToPickup = await _directionsService.getDirections(
+        origin: LatLng(_driverLatitude!, _driverLongitude!),
+        destination: LatLng(
+          widget.ride.pickupLatitude,
+          widget.ride.pickupLongitude,
+        ),
+        optimizeRoute: true,
+      );
+
+      if (driverToPickup != null && mounted) {
+        setState(() {
+          _driverToPickupRoute = driverToPickup.polylinePoints;
+          // Update ETA from real directions
+          final etaSeconds = int.tryParse(driverToPickup.durationValue) ?? 0;
+          _etaMinutes = (etaSeconds / 60).ceil();
+          if (_etaMinutes < 1) _etaMinutes = 1;
+          _etaSeconds = etaSeconds;
+
+          // Update distance
+          final distanceMeters =
+              double.tryParse(driverToPickup.distanceValue) ?? 0;
+          _distanceToPickup = distanceMeters / 1000;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading driver to pickup route: $e');
+    }
   }
 
   void _startEtaCountdown() {
@@ -123,6 +267,13 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
 
     final realtimeService = di.sl<RealtimeService>();
 
+    // Set up periodic route updates (every 30 seconds)
+    _routeUpdateTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (_driverLatitude != null && _driverLongitude != null) {
+        _loadDriverToPickupRoute();
+      }
+    });
+
     realtimeService.subscribeToDriverLocation(
       driverId: _currentRide.driverId!,
       onUpdate: (payload) {
@@ -131,6 +282,8 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
         final heading = (payload['heading'] as num?)?.toDouble();
 
         if (lat != null && lng != null) {
+          final bool isFirstUpdate = _driverLatitude == null;
+
           setState(() {
             _driverLatitude = lat;
             _driverLongitude = lng;
@@ -138,6 +291,11 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
             _updateMarkers();
             _calculateETA();
           });
+
+          // Load route on first driver location update
+          if (isFirstUpdate) {
+            _loadDriverToPickupRoute();
+          }
 
           // Smoothly animate camera to show driver
           _animateCameraToDriver();
@@ -149,7 +307,8 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
   void _animateCameraToDriver() {
     if (_mapController == null ||
         _driverLatitude == null ||
-        _driverLongitude == null) return;
+        _driverLongitude == null)
+      return;
 
     _fitBounds();
   }
@@ -179,10 +338,14 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
           });
           HapticFeedback.mediumImpact();
         } else if (status == 'completed') {
-          Navigator.pushReplacementNamed(
+          Navigator.pushReplacement(
             context,
-            '/ride-summary',
-            arguments: _currentRide.copyWith(status: 'completed'),
+            MaterialPageRoute(
+              builder: (context) => RideSummaryPage(
+                ride: _currentRide.copyWith(status: 'completed'),
+                offer: widget.acceptedOffer,
+              ),
+            ),
           );
         } else if (status == 'cancelled') {
           _showRideCancelledDialog();
@@ -198,7 +361,8 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
     final dLat = _toRadians(widget.ride.pickupLatitude - _driverLatitude!);
     final dLng = _toRadians(widget.ride.pickupLongitude - _driverLongitude!);
 
-    final a = math.sin(dLat / 2) * math.sin(dLat / 2) +
+    final a =
+        math.sin(dLat / 2) * math.sin(dLat / 2) +
         math.cos(_toRadians(_driverLatitude!)) *
             math.cos(_toRadians(widget.ride.pickupLatitude)) *
             math.sin(dLng / 2) *
@@ -223,7 +387,9 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
         Marker(
           markerId: const MarkerId('driver'),
           position: LatLng(_driverLatitude!, _driverLongitude!),
-          icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueAzure,
+          ),
           rotation: _driverHeading ?? 0,
           anchor: const Offset(0.5, 0.5),
           infoWindow: InfoWindow(
@@ -267,28 +433,98 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
         circleId: const CircleId('pickup_pulse'),
         center: LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
         radius: 50 + (_pulseAnimation.value * 100),
-        fillColor: AppColors.success.withOpacity(0.1 * (1 - _pulseAnimation.value)),
-        strokeColor: AppColors.success.withOpacity(0.3 * (1 - _pulseAnimation.value)),
+        fillColor: AppColors.success.withOpacity(
+          0.1 * (1 - _pulseAnimation.value),
+        ),
+        strokeColor: AppColors.success.withOpacity(
+          0.3 * (1 - _pulseAnimation.value),
+        ),
         strokeWidth: 2,
       ),
     };
 
-    // Draw animated route from driver to pickup
-    if (_driverLatitude != null && _driverLongitude != null) {
-      _polylines = {
+    // Draw routes using real road data from Directions API
+    _polylines = {};
+
+    // Draw driver to pickup route (if available)
+    if (_driverToPickupRoute != null && _driverToPickupRoute!.isNotEmpty) {
+      // Shadow line for depth
+      _polylines.add(
         Polyline(
-          polylineId: const PolylineId('driver_to_pickup'),
-          points: _createCurvedRoute(
-            LatLng(_driverLatitude!, _driverLongitude!),
-            LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
-          ),
+          polylineId: const PolylineId('driver_to_pickup_shadow'),
+          points: _driverToPickupRoute!,
+          color: Colors.black.withOpacity(0.15),
+          width: 10,
+          geodesic: true,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          zIndex: 0,
+        ),
+      );
+      // White background
+      _polylines.add(
+        Polyline(
+          polylineId: const PolylineId('driver_to_pickup_bg'),
+          points: _driverToPickupRoute!,
+          color: Colors.white,
+          width: 7,
+          geodesic: true,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          zIndex: 1,
+        ),
+      );
+      // Main route line (animated dashed)
+      _polylines.add(
+        Polyline(
+          polylineId: const PolylineId('driver_to_pickup_main'),
+          points: _driverToPickupRoute!,
           color: AppColors.primary,
           width: 5,
+          geodesic: true,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+          zIndex: 2,
+        ),
+      );
+    } else if (_driverLatitude != null && _driverLongitude != null) {
+      // Fallback to simple line if route not loaded yet
+      _polylines.add(
+        Polyline(
+          polylineId: const PolylineId('driver_to_pickup_simple'),
+          points: [
+            LatLng(_driverLatitude!, _driverLongitude!),
+            LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
+          ],
+          color: AppColors.primary,
+          width: 4,
           patterns: [PatternItem.dash(15), PatternItem.gap(8)],
         ),
-        // Faded route from pickup to dropoff
+      );
+    }
+
+    // Draw pickup to dropoff route (preview, faded)
+    if (_pickupToDropoffRoute != null && _pickupToDropoffRoute!.isNotEmpty) {
+      _polylines.add(
         Polyline(
           polylineId: const PolylineId('pickup_to_dropoff'),
+          points: _pickupToDropoffRoute!,
+          color: Colors.grey.withOpacity(0.4),
+          width: 4,
+          geodesic: true,
+          patterns: [PatternItem.dot, PatternItem.gap(8)],
+          zIndex: 0,
+        ),
+      );
+    } else {
+      // Fallback simple line
+      _polylines.add(
+        Polyline(
+          polylineId: const PolylineId('pickup_to_dropoff_simple'),
           points: [
             LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
             LatLng(widget.ride.dropoffLatitude, widget.ride.dropoffLongitude),
@@ -297,7 +533,7 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
           width: 3,
           patterns: [PatternItem.dot, PatternItem.gap(10)],
         ),
-      };
+      );
     }
   }
 
@@ -307,104 +543,120 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
     final midLng = (start.longitude + end.longitude) / 2;
     final offset = (end.latitude - start.latitude).abs() * 0.1;
 
-    return [
-      start,
-      LatLng(midLat + offset, midLng),
-      end,
-    ];
+    return [start, LatLng(midLat + offset, midLng), end];
   }
 
   void _fitBounds() {
-    if (_mapController == null ||
-        _driverLatitude == null ||
-        _driverLongitude == null) return;
+    if (_mapController == null) return;
+
+    // Calculate bounds including all points
+    final points = <LatLng>[
+      LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
+      LatLng(widget.ride.dropoffLatitude, widget.ride.dropoffLongitude),
+    ];
+
+    if (_driverLatitude != null && _driverLongitude != null) {
+      points.add(LatLng(_driverLatitude!, _driverLongitude!));
+    }
+
+    if (points.isEmpty) return;
+
+    double minLat = points.first.latitude;
+    double maxLat = points.first.latitude;
+    double minLng = points.first.longitude;
+    double maxLng = points.first.longitude;
+
+    for (final point in points) {
+      minLat = math.min(minLat, point.latitude);
+      maxLat = math.max(maxLat, point.latitude);
+      minLng = math.min(minLng, point.longitude);
+      maxLng = math.max(maxLng, point.longitude);
+    }
 
     final bounds = LatLngBounds(
-      southwest: LatLng(
-        math.min(_driverLatitude!, widget.ride.pickupLatitude),
-        math.min(_driverLongitude!, widget.ride.pickupLongitude),
-      ),
-      northeast: LatLng(
-        math.max(_driverLatitude!, widget.ride.pickupLatitude),
-        math.max(_driverLongitude!, widget.ride.pickupLongitude),
-      ),
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
     );
 
-    _mapController?.animateCamera(
-      CameraUpdate.newLatLngBounds(bounds, 120),
-    );
+    _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 120));
   }
 
   void _showDriverArrivedDialog() {
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(12),
-              decoration: BoxDecoration(
-                color: AppColors.success.withOpacity(0.1),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.check_circle,
-                  color: AppColors.success, size: 32),
+      builder:
+          (context) => AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
             ),
-            const SizedBox(width: 12),
-            const Text('Driver Arrived!'),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text(
-              'Your driver has arrived at the pickup location.',
-              textAlign: TextAlign.center,
-            ),
-            if (_currentRide.otp != null) ...[
-              const SizedBox(height: 24),
-              const Text(
-                'Share this OTP with your driver to start the trip:',
-                style: TextStyle(color: Colors.grey),
-                textAlign: TextAlign.center,
-              ),
-              const SizedBox(height: 16),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 32,
-                  vertical: 20,
-                ),
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    colors: [
-                      AppColors.primary.withOpacity(0.1),
-                      AppColors.primary.withOpacity(0.05),
-                    ],
+            title: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppColors.success.withOpacity(0.1),
+                    shape: BoxShape.circle,
                   ),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: AppColors.primary, width: 2),
-                ),
-                child: Text(
-                  _currentRide.otp!,
-                  style: const TextStyle(
-                    fontSize: 36,
-                    fontWeight: FontWeight.bold,
-                    letterSpacing: 12,
+                  child: const Icon(
+                    Icons.check_circle,
+                    color: AppColors.success,
+                    size: 32,
                   ),
                 ),
+                const SizedBox(width: 12),
+                const Text('Driver Arrived!'),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'Your driver has arrived at the pickup location.',
+                  textAlign: TextAlign.center,
+                ),
+                if (_currentRide.otp != null) ...[
+                  const SizedBox(height: 24),
+                  const Text(
+                    'Share this OTP with your driver to start the trip:',
+                    style: TextStyle(color: Colors.grey),
+                    textAlign: TextAlign.center,
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 32,
+                      vertical: 20,
+                    ),
+                    decoration: BoxDecoration(
+                      gradient: LinearGradient(
+                        colors: [
+                          AppColors.primary.withOpacity(0.1),
+                          AppColors.primary.withOpacity(0.05),
+                        ],
+                      ),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(color: AppColors.primary, width: 2),
+                    ),
+                    child: Text(
+                      _currentRide.otp!,
+                      style: const TextStyle(
+                        fontSize: 36,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 12,
+                      ),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('GOT IT'),
               ),
             ],
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('GOT IT'),
           ),
-        ],
-      ),
     );
   }
 
@@ -412,28 +664,31 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
     showDialog(
       context: context,
       barrierDismissible: false,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Row(
-          children: [
-            Icon(Icons.cancel, color: AppColors.error, size: 32),
-            SizedBox(width: 12),
-            Text('Ride Cancelled'),
-          ],
-        ),
-        content: const Text(
-          'Unfortunately, this ride has been cancelled. We apologize for the inconvenience.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(context);
-              Navigator.pop(context);
-            },
-            child: const Text('OK'),
+      builder:
+          (context) => AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.cancel, color: AppColors.error, size: 32),
+                SizedBox(width: 12),
+                Text('Ride Cancelled'),
+              ],
+            ),
+            content: const Text(
+              'Unfortunately, this ride has been cancelled. We apologize for the inconvenience.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  Navigator.pop(context);
+                },
+                child: const Text('OK'),
+              ),
+            ],
           ),
-        ],
-      ),
     );
   }
 
@@ -452,8 +707,9 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
           ),
           backgroundColor: Colors.orange,
           behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
         ),
       );
       return;
@@ -467,30 +723,20 @@ class _UserRideTrackingPageState extends State<UserRideTrackingPage>
 
   Future<void> _messageDriver() async {
     HapticFeedback.lightImpact();
-    final driverPhone = widget.acceptedOffer?.driverPhone;
-    if (driverPhone == null || driverPhone.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Row(
-            children: [
-              Icon(Icons.warning, color: Colors.white),
-              SizedBox(width: 8),
-              Text('Driver phone number not available'),
-            ],
-          ),
-          backgroundColor: Colors.orange,
-          behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    
+    // Open in-app chat with driver
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ChatScreenPage(
+          recipientId: widget.acceptedOffer?.driverId ?? '',
+          recipientName: widget.acceptedOffer?.driverName ?? 'Driver',
+          recipientImage: widget.acceptedOffer?.driverPhoto,
+          rideId: widget.ride.id,
+          isOnline: true,
         ),
-      );
-      return;
-    }
-
-    final uri = Uri.parse('sms:$driverPhone');
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
-    }
+      ),
+    );
   }
 
   Future<void> _shareRide() async {
@@ -516,36 +762,39 @@ Track my ride on Ridooo App!
   void _cancelRide() {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text('Cancel Ride?'),
-        content: const Text(
-          'Are you sure you want to cancel this ride? Cancellation charges may apply.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('NO, KEEP RIDE'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              context.read<BookingBloc>().add(
+      builder:
+          (context) => AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: const Text('Cancel Ride?'),
+            content: const Text(
+              'Are you sure you want to cancel this ride? Cancellation charges may apply.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('NO, KEEP RIDE'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  context.read<BookingBloc>().add(
                     CancelRideRequested(
                       rideId: _currentRide.id,
                       reason: 'User cancelled',
                     ),
                   );
-              Navigator.pop(context);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.error,
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('YES, CANCEL'),
+                  Navigator.pop(context);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.error,
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('YES, CANCEL'),
+              ),
+            ],
           ),
-        ],
-      ),
     );
   }
 
@@ -599,9 +848,7 @@ Track my ride on Ridooo App!
                   ),
                   const SizedBox(width: 12),
                   // Status pill
-                  Expanded(
-                    child: _buildStatusPill(isArrived, isInProgress),
-                  ),
+                  Expanded(child: _buildStatusPill(isArrived, isInProgress)),
                   const SizedBox(width: 12),
                   // Share button
                   _buildCircularButton(
@@ -642,8 +889,9 @@ Track my ride on Ridooo App!
                 return Container(
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    borderRadius:
-                        const BorderRadius.vertical(top: Radius.circular(24)),
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(24),
+                    ),
                     boxShadow: [
                       BoxShadow(
                         color: Colors.black.withOpacity(0.1),
@@ -730,10 +978,7 @@ Track my ride on Ridooo App!
         color: Colors.white,
         shape: BoxShape.circle,
         boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-          ),
+          BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10),
         ],
       ),
       child: IconButton(
@@ -768,10 +1013,7 @@ Track my ride on Ridooo App!
         color: Colors.white,
         borderRadius: BorderRadius.circular(30),
         boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-          ),
+          BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10),
         ],
       ),
       child: Row(
@@ -833,8 +1075,9 @@ Track my ride on Ridooo App!
             ),
             backgroundColor: AppColors.error,
             behavior: SnackBarBehavior.floating,
-            shape:
-                RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
         );
       },
@@ -893,16 +1136,13 @@ Track my ride on Ridooo App!
               width: 28,
               height: 28,
               decoration: BoxDecoration(
-                color: stage.isCompleted
-                    ? AppColors.success
-                    : Colors.grey.shade300,
+                color:
+                    stage.isCompleted
+                        ? AppColors.success
+                        : Colors.grey.shade300,
                 shape: BoxShape.circle,
               ),
-              child: Icon(
-                stage.icon,
-                color: Colors.white,
-                size: 16,
-              ),
+              child: Icon(stage.icon, color: Colors.white, size: 16),
             );
           }
         }),
@@ -926,12 +1166,18 @@ Track my ride on Ridooo App!
                 child: CircleAvatar(
                   radius: 32,
                   backgroundColor: Colors.grey.shade200,
-                  backgroundImage: widget.acceptedOffer?.driverPhoto != null
-                      ? NetworkImage(widget.acceptedOffer!.driverPhoto!)
-                      : null,
-                  child: widget.acceptedOffer?.driverPhoto == null
-                      ? const Icon(Icons.person, size: 32, color: Colors.grey)
-                      : null,
+                  backgroundImage:
+                      widget.acceptedOffer?.driverPhoto != null
+                          ? NetworkImage(widget.acceptedOffer!.driverPhoto!)
+                          : null,
+                  child:
+                      widget.acceptedOffer?.driverPhoto == null
+                          ? const Icon(
+                            Icons.person,
+                            size: 32,
+                            color: Colors.grey,
+                          )
+                          : null,
                 ),
               ),
               Positioned(
@@ -967,19 +1213,21 @@ Track my ride on Ridooo App!
                   children: [
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
+                        horizontal: 6,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: Colors.amber.withOpacity(0.2),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.star,
-                              color: Colors.amber, size: 14),
+                          const Icon(Icons.star, color: Colors.amber, size: 14),
                           const SizedBox(width: 2),
                           Text(
-                            widget.acceptedOffer?.driverRating
-                                    .toStringAsFixed(1) ??
+                            widget.acceptedOffer?.driverRating.toStringAsFixed(
+                                  1,
+                                ) ??
                                 '4.5',
                             style: const TextStyle(
                               fontWeight: FontWeight.w600,
@@ -1072,7 +1320,8 @@ Track my ride on Ridooo App!
                         height: 14,
                         decoration: BoxDecoration(
                           color: _getColorFromName(
-                              widget.acceptedOffer!.vehicleColor),
+                            widget.acceptedOffer!.vehicleColor,
+                          ),
                           shape: BoxShape.circle,
                           border: Border.all(color: Colors.grey.shade400),
                         ),
@@ -1127,8 +1376,8 @@ Track my ride on Ridooo App!
       tilePadding: const EdgeInsets.symmetric(horizontal: 20),
       childrenPadding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
       initiallyExpanded: _showTripDetails,
-      onExpansionChanged: (expanded) =>
-          setState(() => _showTripDetails = expanded),
+      onExpansionChanged:
+          (expanded) => setState(() => _showTripDetails = expanded),
       children: [
         // Pickup
         _buildLocationRow(
@@ -1192,10 +1441,7 @@ Track my ride on Ridooo App!
             children: [
               Text(
                 label,
-                style: TextStyle(
-                  color: Colors.grey.shade600,
-                  fontSize: 12,
-                ),
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
               ),
               const SizedBox(height: 2),
               Text(
@@ -1266,10 +1512,7 @@ Track my ride on Ridooo App!
               const SizedBox(width: 12),
               const Text(
                 'Trip OTP',
-                style: TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 16,
-                ),
+                style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
               ),
             ],
           ),
@@ -1285,10 +1528,7 @@ Track my ride on Ridooo App!
           const SizedBox(height: 8),
           Text(
             'Share this code with your driver',
-            style: TextStyle(
-              color: Colors.grey.shade600,
-              fontSize: 12,
-            ),
+            style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
           ),
         ],
       ),
@@ -1311,6 +1551,21 @@ Track my ride on Ridooo App!
                   borderRadius: BorderRadius.circular(12),
                 ),
                 side: const BorderSide(color: AppColors.primary),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _messageDriver,
+              icon: const Icon(Icons.chat_bubble_outline),
+              label: const Text('Chat'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                side: BorderSide(color: Colors.grey.shade400),
               ),
             ),
           ),

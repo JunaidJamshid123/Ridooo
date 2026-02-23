@@ -7,11 +7,12 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../../../core/theme/app_colors.dart';
+import '../../../../../core/services/directions_service.dart';
 import '../../../../user/booking/domain/entities/ride.dart';
 import '../../../../user/booking/domain/entities/driver_offer.dart';
+import '../../../../user/chat/presentation/pages/chat_screen_page.dart';
 import '../bloc/driver_rides_bloc.dart';
 import '../bloc/driver_rides_event.dart';
-import '../bloc/driver_rides_state.dart';
 
 /// Enhanced Active Ride Page for Driver - Phase 2: Driver En Route to Pickup
 class DriverActiveRidePage extends StatefulWidget {
@@ -28,12 +29,18 @@ class DriverActiveRidePage extends StatefulWidget {
   State<DriverActiveRidePage> createState() => _DriverActiveRidePageState();
 }
 
+enum RidePhase { enRouteToPickup, arrivedAtPickup, inProgress, completed }
+
 class _DriverActiveRidePageState extends State<DriverActiveRidePage>
     with TickerProviderStateMixin {
   GoogleMapController? _mapController;
   Position? _currentPosition;
   StreamSubscription<Position>? _positionStream;
   Timer? _locationUpdateTimer;
+  Timer? _routeUpdateTimer;
+
+  // Directions service for real routes
+  final DirectionsService _directionsService = DirectionsService();
 
   Set<Marker> _markers = {};
   Set<Polyline> _polylines = {};
@@ -41,8 +48,17 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
 
   int _etaMinutes = 0;
   double _distanceToPickup = 0;
+  double _distanceToDropoff = 0;
   bool _isNavigating = false;
   bool _showTripDetails = false;
+  
+  // Current ride phase
+  RidePhase _currentPhase = RidePhase.enRouteToPickup;
+
+  // Route points for accurate road display
+  List<LatLng>? _driverToPickupRoute;
+  List<LatLng>? _pickupToDropoffRoute;
+  bool _isLoadingRoute = false;
 
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
@@ -62,15 +78,19 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
   void initState() {
     super.initState();
     _etaMinutes = widget.offer.etaMinutes ?? 5;
+    
+    // Set initial phase based on ride status
+    _setPhaseFromRideStatus(widget.ride.status);
 
     // Initialize animations
     _pulseController = AnimationController(
       duration: const Duration(seconds: 2),
       vsync: this,
     )..repeat();
-    _pulseAnimation = Tween<double>(begin: 0, end: 1).animate(
-      CurvedAnimation(parent: _pulseController, curve: Curves.easeOut),
-    );
+    _pulseAnimation = Tween<double>(
+      begin: 0,
+      end: 1,
+    ).animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeOut));
 
     _slideController = AnimationController(
       duration: const Duration(milliseconds: 400),
@@ -84,16 +104,142 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
 
     _initializeLocation();
     _startLocationUpdates();
+    _loadRoutes(); // Load accurate road routes
   }
 
   @override
   void dispose() {
     _positionStream?.cancel();
     _locationUpdateTimer?.cancel();
+    _routeUpdateTimer?.cancel();
     _pulseController.dispose();
     _slideController.dispose();
     _mapController?.dispose();
     super.dispose();
+  }
+  
+  void _setPhaseFromRideStatus(String status) {
+    switch (status) {
+      case 'driver_assigned':
+      case 'en_route_to_pickup':
+        _currentPhase = RidePhase.enRouteToPickup;
+        _driverStages[0].isCompleted = true;
+        _driverStages[1].isCompleted = true;
+        break;
+      case 'driver_arrived':
+      case 'arrived_at_pickup':
+        _currentPhase = RidePhase.arrivedAtPickup;
+        _driverStages[0].isCompleted = true;
+        _driverStages[1].isCompleted = true;
+        _driverStages[2].isCompleted = true;
+        break;
+      case 'in_progress':
+        _currentPhase = RidePhase.inProgress;
+        _driverStages[0].isCompleted = true;
+        _driverStages[1].isCompleted = true;
+        _driverStages[2].isCompleted = true;
+        _driverStages[3].isCompleted = true;
+        break;
+      case 'completed':
+        _currentPhase = RidePhase.completed;
+        _driverStages[0].isCompleted = true;
+        _driverStages[1].isCompleted = true;
+        _driverStages[2].isCompleted = true;
+        _driverStages[3].isCompleted = true;
+        _driverStages[4].isCompleted = true;
+        break;
+      default:
+        _currentPhase = RidePhase.enRouteToPickup;
+    }
+  }
+
+  void _updateDistances() {
+    if (_currentPosition == null) return;
+    
+    // Calculate distance to pickup
+    _distanceToPickup = Geolocator.distanceBetween(
+      _currentPosition!.latitude,
+      _currentPosition!.longitude,
+      widget.ride.pickupLatitude,
+      widget.ride.pickupLongitude,
+    ) / 1000; // Convert to km
+    
+    // Calculate distance to dropoff
+    _distanceToDropoff = Geolocator.distanceBetween(
+      _currentPosition!.latitude,
+      _currentPosition!.longitude,
+      widget.ride.dropoffLatitude,
+      widget.ride.dropoffLongitude,
+    ) / 1000; // Convert to km
+  }
+
+  /// Load accurate routes from Google Directions API
+  Future<void> _loadRoutes() async {
+    setState(() => _isLoadingRoute = true);
+
+    try {
+      // Load pickup to dropoff route
+      final pickupToDropoff = await _directionsService.getDirections(
+        origin: LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
+        destination: LatLng(
+          widget.ride.dropoffLatitude,
+          widget.ride.dropoffLongitude,
+        ),
+        optimizeRoute: true,
+      );
+
+      if (pickupToDropoff != null) {
+        _pickupToDropoffRoute = pickupToDropoff.polylinePoints;
+      }
+
+      // Load driver to pickup route if driver location is available
+      if (_currentPosition != null) {
+        await _loadDriverToPickupRoute();
+      }
+    } catch (e) {
+      debugPrint('Error loading routes: $e');
+    }
+
+    if (mounted) {
+      setState(() {
+        _isLoadingRoute = false;
+        _updateMarkers();
+      });
+      _moveToFitBounds();
+    }
+  }
+
+  /// Load route from driver to pickup location
+  Future<void> _loadDriverToPickupRoute() async {
+    if (_currentPosition == null) return;
+
+    try {
+      final driverToPickup = await _directionsService.getDirections(
+        origin: LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+        destination: LatLng(
+          widget.ride.pickupLatitude,
+          widget.ride.pickupLongitude,
+        ),
+        optimizeRoute: true,
+      );
+
+      if (driverToPickup != null && mounted) {
+        setState(() {
+          _driverToPickupRoute = driverToPickup.polylinePoints;
+          // Update ETA from real directions
+          final etaSeconds = int.tryParse(driverToPickup.durationValue) ?? 0;
+          _etaMinutes = (etaSeconds / 60).ceil();
+          if (_etaMinutes < 1) _etaMinutes = 1;
+
+          // Update distance
+          final distanceMeters =
+              double.tryParse(driverToPickup.distanceValue) ?? 0;
+          _distanceToPickup = distanceMeters / 1000;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading driver to pickup route: $e');
+    }
   }
 
   Future<void> _initializeLocation() async {
@@ -107,13 +253,21 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
         desiredAccuracy: LocationAccuracy.high,
       );
 
-      setState(() {
-        _currentPosition = position;
-        _updateMarkers();
-        _calculateDistance();
-      });
+      if (mounted) {
+        setState(() {
+          _currentPosition = position;
+          _updateMarkers();
+          _calculateDistance();
+        });
 
-      _moveToFitBounds();
+        // Load routes after getting current position
+        await _loadDriverToPickupRoute();
+
+        // Fit map bounds after location and routes are loaded
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (mounted) _moveToFitBounds();
+        });
+      }
     } catch (e) {
       debugPrint('Error getting location: $e');
     }
@@ -127,49 +281,76 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
         distanceFilter: 10, // Update every 10 meters
       ),
     ).listen((position) {
+      final bool isFirstUpdate = _currentPosition == null;
+
       setState(() {
         _currentPosition = position;
         _updateMarkers();
         _calculateDistance();
       });
+
+      // Load route on first position update
+      if (isFirstUpdate) {
+        _loadDriverToPickupRoute();
+      }
     });
 
-    // Update driver location in database every 5 seconds
+    // Update driver location in database every 3 seconds for near real-time tracking
     _locationUpdateTimer = Timer.periodic(
-      const Duration(seconds: 5),
+      const Duration(seconds: 3),
       (_) => _sendLocationUpdate(),
     );
+
+    // Periodically refresh routes every 30 seconds for accurate ETA
+    _routeUpdateTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      if (_currentPosition != null) {
+        _loadDriverToPickupRoute();
+      }
+    });
   }
 
   void _sendLocationUpdate() {
     if (_currentPosition == null) return;
 
     context.read<DriverRidesBloc>().add(
-          UpdateDriverLocation(
-            latitude: _currentPosition!.latitude,
-            longitude: _currentPosition!.longitude,
-            heading: _currentPosition!.heading,
-            speed: _currentPosition!.speed,
-            accuracy: _currentPosition!.accuracy,
-            isOnline: true,
-          ),
-        );
+      UpdateDriverLocation(
+        latitude: _currentPosition!.latitude,
+        longitude: _currentPosition!.longitude,
+        heading: _currentPosition!.heading,
+        speed: _currentPosition!.speed,
+        accuracy: _currentPosition!.accuracy,
+        isOnline: true,
+      ),
+    );
   }
 
   void _calculateDistance() {
     if (_currentPosition == null) return;
 
-    final distanceInMeters = Geolocator.distanceBetween(
+    final distanceToPickupMeters = Geolocator.distanceBetween(
       _currentPosition!.latitude,
       _currentPosition!.longitude,
       widget.ride.pickupLatitude,
       widget.ride.pickupLongitude,
     );
+    
+    final distanceToDropoffMeters = Geolocator.distanceBetween(
+      _currentPosition!.latitude,
+      _currentPosition!.longitude,
+      widget.ride.dropoffLatitude,
+      widget.ride.dropoffLongitude,
+    );
 
     setState(() {
-      _distanceToPickup = distanceInMeters / 1000; // Convert to km
-      // Rough ETA calculation: assuming average speed of 30 km/h
-      _etaMinutes = (_distanceToPickup / 0.5).ceil(); // 0.5 km per minute
+      _distanceToPickup = distanceToPickupMeters / 1000; // Convert to km
+      _distanceToDropoff = distanceToDropoffMeters / 1000; // Convert to km
+      
+      // Rough ETA calculation based on current phase
+      if (_currentPhase == RidePhase.inProgress) {
+        _etaMinutes = (_distanceToDropoff / 0.5).ceil();
+      } else {
+        _etaMinutes = (_distanceToPickup / 0.5).ceil();
+      }
       if (_etaMinutes < 1) _etaMinutes = 1;
     });
   }
@@ -184,8 +365,9 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
             _currentPosition!.latitude,
             _currentPosition!.longitude,
           ),
-          icon:
-              BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueAzure),
+          icon: BitmapDescriptor.defaultMarkerWithHue(
+            BitmapDescriptor.hueAzure,
+          ),
           infoWindow: const InfoWindow(title: 'Your Location'),
           rotation: _currentPosition!.heading,
           anchor: const Offset(0.5, 0.5),
@@ -223,34 +405,100 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
     _circles = {
       Circle(
         circleId: const CircleId('pickup_pulse'),
-        center:
-            LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
+        center: LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
         radius: 30 + (_pulseAnimation.value * 70),
-        fillColor:
-            AppColors.success.withOpacity(0.15 * (1 - _pulseAnimation.value)),
-        strokeColor:
-            AppColors.success.withOpacity(0.4 * (1 - _pulseAnimation.value)),
+        fillColor: AppColors.success.withOpacity(
+          0.15 * (1 - _pulseAnimation.value),
+        ),
+        strokeColor: AppColors.success.withOpacity(
+          0.4 * (1 - _pulseAnimation.value),
+        ),
         strokeWidth: 2,
       ),
     };
 
-    // Draw route polyline
-    if (_currentPosition != null) {
-      _polylines = {
-        // Route to pickup
+    // Draw routes using real road data from Directions API
+    _polylines = {};
+
+    // Draw driver to pickup route (if available)
+    if (_driverToPickupRoute != null && _driverToPickupRoute!.isNotEmpty) {
+      // Shadow line for depth
+      _polylines.add(
         Polyline(
-          polylineId: const PolylineId('route_to_pickup'),
-          points: _createCurvedRoute(
-            LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
-            LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
-          ),
+          polylineId: const PolylineId('driver_to_pickup_shadow'),
+          points: _driverToPickupRoute!,
+          color: Colors.black.withOpacity(0.15),
+          width: 10,
+          geodesic: true,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          zIndex: 0,
+        ),
+      );
+      // White background
+      _polylines.add(
+        Polyline(
+          polylineId: const PolylineId('driver_to_pickup_bg'),
+          points: _driverToPickupRoute!,
+          color: Colors.white,
+          width: 7,
+          geodesic: true,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          zIndex: 1,
+        ),
+      );
+      // Main route line
+      _polylines.add(
+        Polyline(
+          polylineId: const PolylineId('driver_to_pickup_main'),
+          points: _driverToPickupRoute!,
           color: AppColors.primary,
           width: 5,
+          geodesic: true,
+          startCap: Cap.roundCap,
+          endCap: Cap.roundCap,
+          jointType: JointType.round,
+          patterns: [PatternItem.dash(20), PatternItem.gap(10)],
+          zIndex: 2,
+        ),
+      );
+    } else if (_currentPosition != null) {
+      // Fallback to simple line if route not loaded yet
+      _polylines.add(
+        Polyline(
+          polylineId: const PolylineId('driver_to_pickup_simple'),
+          points: [
+            LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+            LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
+          ],
+          color: AppColors.primary,
+          width: 4,
           patterns: [PatternItem.dash(15), PatternItem.gap(8)],
         ),
-        // Route from pickup to dropoff (faded)
+      );
+    }
+
+    // Draw pickup to dropoff route (preview, faded)
+    if (_pickupToDropoffRoute != null && _pickupToDropoffRoute!.isNotEmpty) {
+      _polylines.add(
         Polyline(
           polylineId: const PolylineId('pickup_to_dropoff'),
+          points: _pickupToDropoffRoute!,
+          color: Colors.grey.withOpacity(0.4),
+          width: 4,
+          geodesic: true,
+          patterns: [PatternItem.dot, PatternItem.gap(8)],
+          zIndex: 0,
+        ),
+      );
+    } else {
+      // Fallback simple line
+      _polylines.add(
+        Polyline(
+          polylineId: const PolylineId('pickup_to_dropoff_simple'),
           points: [
             LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
             LatLng(widget.ride.dropoffLatitude, widget.ride.dropoffLongitude),
@@ -259,7 +507,7 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
           width: 3,
           patterns: [PatternItem.dot, PatternItem.gap(10)],
         ),
-      };
+      );
     }
   }
 
@@ -268,30 +516,44 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
     final midLng = (start.longitude + end.longitude) / 2;
     final offset = (end.latitude - start.latitude).abs() * 0.1;
 
-    return [
-      start,
-      LatLng(midLat + offset, midLng),
-      end,
-    ];
+    return [start, LatLng(midLat + offset, midLng), end];
   }
 
   void _moveToFitBounds() {
-    if (_mapController == null || _currentPosition == null) return;
+    if (_mapController == null) return;
+
+    // Calculate bounds including all points
+    final points = <LatLng>[
+      LatLng(widget.ride.pickupLatitude, widget.ride.pickupLongitude),
+      LatLng(widget.ride.dropoffLatitude, widget.ride.dropoffLongitude),
+    ];
+
+    if (_currentPosition != null) {
+      points.add(
+        LatLng(_currentPosition!.latitude, _currentPosition!.longitude),
+      );
+    }
+
+    if (points.isEmpty) return;
+
+    double minLat = points.first.latitude;
+    double maxLat = points.first.latitude;
+    double minLng = points.first.longitude;
+    double maxLng = points.first.longitude;
+
+    for (final point in points) {
+      minLat = math.min(minLat, point.latitude);
+      maxLat = math.max(maxLat, point.latitude);
+      minLng = math.min(minLng, point.longitude);
+      maxLng = math.max(maxLng, point.longitude);
+    }
 
     final bounds = LatLngBounds(
-      southwest: LatLng(
-        math.min(_currentPosition!.latitude, widget.ride.pickupLatitude),
-        math.min(_currentPosition!.longitude, widget.ride.pickupLongitude),
-      ),
-      northeast: LatLng(
-        math.max(_currentPosition!.latitude, widget.ride.pickupLatitude),
-        math.max(_currentPosition!.longitude, widget.ride.pickupLongitude),
-      ),
+      southwest: LatLng(minLat, minLng),
+      northeast: LatLng(maxLat, maxLng),
     );
 
-    _mapController?.animateCamera(
-      CameraUpdate.newLatLngBounds(bounds, 120),
-    );
+    _mapController?.animateCamera(CameraUpdate.newLatLngBounds(bounds, 120));
   }
 
   Future<void> _openGoogleMapsNavigation() async {
@@ -326,8 +588,9 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
           ),
           backgroundColor: Colors.orange,
           behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(10),
+          ),
         ),
       );
       return;
@@ -341,49 +604,103 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
 
   Future<void> _messageUser() async {
     HapticFeedback.lightImpact();
-    final userPhone = widget.ride.userPhone;
-    if (userPhone == null || userPhone.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: const Row(
-            children: [
-              Icon(Icons.warning, color: Colors.white),
-              SizedBox(width: 8),
-              Text('User phone number not available'),
-            ],
-          ),
-          backgroundColor: Colors.orange,
-          behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+    
+    // Open in-app chat with user
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => ChatScreenPage(
+          recipientId: widget.ride.userId,
+          recipientName: widget.ride.userName ?? 'User',
+          recipientImage: widget.ride.userPhoto,
+          rideId: widget.ride.id,
+          isOnline: true,
         ),
-      );
-      return;
-    }
-
-    final uri = Uri.parse('sms:$userPhone');
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri);
-    }
+      ),
+    );
   }
 
   void _markAsArrived() {
     HapticFeedback.heavyImpact();
     context.read<DriverRidesBloc>().add(
-          MarkArrivedAtPickup(rideId: widget.ride.id),
-        );
+      MarkArrivedAtPickup(rideId: widget.ride.id),
+    );
 
     setState(() {
       _driverStages[2].isCompleted = true;
+      _currentPhase = RidePhase.arrivedAtPickup;
     });
 
-    // Show OTP input dialog
-    _showOtpInputDialog();
+    // Show confirmation snackbar
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Row(
+          children: [
+            Icon(Icons.check_circle, color: Colors.white),
+            SizedBox(width: 8),
+            Text('You\'ve arrived! Ready to start the trip.'),
+          ],
+        ),
+        backgroundColor: AppColors.success,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+    );
   }
 
-  void _showOtpInputDialog() {
-    final otpController = TextEditingController();
+  void _startTrip() {
+    HapticFeedback.heavyImpact();
+    
+    // Show OTP dialog for verification (optional)
+    _showOtpInputDialog();
+  }
+  
+  void _startTripWithoutOtp() {
+    HapticFeedback.heavyImpact();
+    context.read<DriverRidesBloc>().add(
+      StartTrip(rideId: widget.ride.id),
+    );
 
+    setState(() {
+      _driverStages[3].isCompleted = true;
+      _currentPhase = RidePhase.inProgress;
+    });
+    
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Row(
+          children: [
+            Icon(Icons.directions_car, color: Colors.white),
+            SizedBox(width: 8),
+            Text('Trip started! Navigate to destination.'),
+          ],
+        ),
+        backgroundColor: AppColors.primary,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+      ),
+    );
+    
+    // Update navigation to destination
+    _openGoogleMapsToDropoff();
+  }
+  
+  void _completeTrip() {
+    HapticFeedback.heavyImpact();
+    context.read<DriverRidesBloc>().add(
+      CompleteTrip(rideId: widget.ride.id),
+    );
+
+    setState(() {
+      _driverStages[4].isCompleted = true;
+      _currentPhase = RidePhase.completed;
+    });
+    
+    // Show completion dialog
+    _showTripCompletedDialog();
+  }
+  
+  void _showTripCompletedDialog() {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -397,120 +714,221 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
                 color: AppColors.success.withOpacity(0.1),
                 shape: BoxShape.circle,
               ),
-              child: const Icon(Icons.check_circle,
-                  color: AppColors.success, size: 28),
+              child: const Icon(Icons.check_circle, color: AppColors.success, size: 28),
             ),
             const SizedBox(width: 12),
-            const Text("You've Arrived!"),
+            const Text('Trip Completed!'),
           ],
         ),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             Text(
-              'Ask ${widget.ride.userName ?? 'the passenger'} for the OTP to start the trip.',
-              textAlign: TextAlign.center,
+              'Great job! You earned',
               style: TextStyle(color: Colors.grey.shade600),
             ),
-            const SizedBox(height: 20),
-            TextField(
-              controller: otpController,
-              keyboardType: TextInputType.number,
-              maxLength: 4,
-              textAlign: TextAlign.center,
+            const SizedBox(height: 16),
+            Text(
+              '₨${widget.offer.offeredPrice.toStringAsFixed(0)}',
               style: const TextStyle(
-                fontSize: 28,
+                fontSize: 36,
                 fontWeight: FontWeight.bold,
-                letterSpacing: 12,
+                color: AppColors.success,
               ),
-              decoration: InputDecoration(
-                hintText: '----',
-                hintStyle: TextStyle(
-                  color: Colors.grey.shade400,
-                  letterSpacing: 12,
-                ),
-                counterText: '',
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: AppColors.primary),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
-                  borderSide: BorderSide(color: AppColors.primary, width: 2),
-                ),
-              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '${widget.ride.distanceKm.toStringAsFixed(1)} km • ${widget.ride.estimatedDurationMinutes} min',
+              style: TextStyle(color: Colors.grey.shade500),
             ),
           ],
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('CANCEL'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              final otp = otpController.text;
-              if (otp.length == 4) {
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: () {
                 Navigator.pop(context);
-                context.read<DriverRidesBloc>().add(
-                      VerifyOtpAndStartTrip(
-                        rideId: widget.ride.id,
-                        otp: otp,
-                      ),
-                    );
-                setState(() {
-                  _driverStages[3].isCompleted = true;
-                });
-              }
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.primary,
-              foregroundColor: Colors.white,
+                Navigator.pop(context); // Go back to main screen
+              },
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.success,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+              child: const Text('DONE'),
             ),
-            child: const Text('START TRIP'),
           ),
         ],
       ),
+    );
+  }
+  
+  Future<void> _openGoogleMapsToDropoff() async {
+    final url = 'google.navigation:q=${widget.ride.dropoffLatitude},${widget.ride.dropoffLongitude}&mode=d';
+    final uri = Uri.parse(url);
+
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri);
+    } else {
+      final webUrl = 'https://www.google.com/maps/dir/?api=1&destination=${widget.ride.dropoffLatitude},${widget.ride.dropoffLongitude}&travelmode=driving';
+      await launchUrl(Uri.parse(webUrl), mode: LaunchMode.externalApplication);
+    }
+  }
+
+  void _showOtpInputDialog() {
+    final otpController = TextEditingController();
+
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder:
+          (context) => AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+            ),
+            title: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: AppColors.success.withOpacity(0.1),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.check_circle,
+                    color: AppColors.success,
+                    size: 28,
+                  ),
+                ),
+                const SizedBox(width: 12),
+                const Text("You've Arrived!"),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Ask ${widget.ride.userName ?? 'the passenger'} for the OTP to start the trip.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey.shade600),
+                ),
+                const SizedBox(height: 20),
+                TextField(
+                  controller: otpController,
+                  keyboardType: TextInputType.number,
+                  maxLength: 4,
+                  textAlign: TextAlign.center,
+                  style: const TextStyle(
+                    fontSize: 28,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 12,
+                  ),
+                  decoration: InputDecoration(
+                    hintText: '----',
+                    hintStyle: TextStyle(
+                      color: Colors.grey.shade400,
+                      letterSpacing: 12,
+                    ),
+                    counterText: '',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: AppColors.primary),
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(
+                        color: AppColors.primary,
+                        width: 2,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('CANCEL'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  final otp = otpController.text;
+                  if (otp.length == 4) {
+                    Navigator.pop(context);
+                    context.read<DriverRidesBloc>().add(
+                      VerifyOtpAndStartTrip(rideId: widget.ride.id, otp: otp),
+                    );
+                    setState(() {
+                      _driverStages[3].isCompleted = true;
+                      _currentPhase = RidePhase.inProgress;
+                    });
+                    // Navigate to dropoff
+                    _openGoogleMapsToDropoff();
+                  }
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.primary,
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('START TRIP'),
+              ),
+              const SizedBox(width: 8),
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  _startTripWithoutOtp();
+                },
+                child: const Text('SKIP OTP'),
+              ),
+            ],
+          ),
     );
   }
 
   void _cancelRide() {
     showDialog(
       context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Row(
-          children: [
-            Icon(Icons.warning_amber_rounded, color: AppColors.warning),
-            SizedBox(width: 12),
-            Text('Cancel Ride?'),
-          ],
-        ),
-        content: const Text(
-          'Are you sure you want to cancel this ride? This may affect your rating and acceptance score.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('NO, KEEP RIDE'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(context);
-              context.read<DriverRidesBloc>().add(
-                    CancelActiveRide(
-                        rideId: widget.ride.id, reason: 'Driver cancelled'),
-                  );
-              Navigator.pop(context);
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppColors.error,
-              foregroundColor: Colors.white,
+      builder:
+          (context) => AlertDialog(
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
             ),
-            child: const Text('YES, CANCEL'),
+            title: const Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, color: AppColors.warning),
+                SizedBox(width: 12),
+                Text('Cancel Ride?'),
+              ],
+            ),
+            content: const Text(
+              'Are you sure you want to cancel this ride? This may affect your rating and acceptance score.',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('NO, KEEP RIDE'),
+              ),
+              ElevatedButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  context.read<DriverRidesBloc>().add(
+                    CancelActiveRide(
+                      rideId: widget.ride.id,
+                      reason: 'Driver cancelled',
+                    ),
+                  );
+                  Navigator.pop(context);
+                },
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: AppColors.error,
+                  foregroundColor: Colors.white,
+                ),
+                child: const Text('YES, CANCEL'),
+              ),
+            ],
           ),
-        ],
-      ),
     );
   }
 
@@ -569,9 +987,7 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
                     onPressed: _cancelRide,
                   ),
                   const SizedBox(width: 12),
-                  Expanded(
-                    child: _buildStatusPill(),
-                  ),
+                  Expanded(child: _buildStatusPill()),
                   const SizedBox(width: 12),
                   _buildCircularButton(
                     icon: Icons.my_location,
@@ -600,8 +1016,9 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
                 return Container(
                   decoration: BoxDecoration(
                     color: Colors.white,
-                    borderRadius:
-                        const BorderRadius.vertical(top: Radius.circular(24)),
+                    borderRadius: const BorderRadius.vertical(
+                      top: Radius.circular(24),
+                    ),
                     boxShadow: [
                       BoxShadow(
                         color: Colors.black.withOpacity(0.1),
@@ -677,10 +1094,7 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
         color: Colors.white,
         shape: BoxShape.circle,
         boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-          ),
+          BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10),
         ],
       ),
       child: IconButton(
@@ -691,16 +1105,40 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
   }
 
   Widget _buildStatusPill() {
+    String statusText;
+    IconData statusIcon;
+    Color statusColor;
+    
+    switch (_currentPhase) {
+      case RidePhase.enRouteToPickup:
+        statusText = 'En Route to Pickup';
+        statusIcon = Icons.navigation;
+        statusColor = AppColors.primary;
+        break;
+      case RidePhase.arrivedAtPickup:
+        statusText = 'Arrived - Start Ride';
+        statusIcon = Icons.location_on;
+        statusColor = AppColors.success;
+        break;
+      case RidePhase.inProgress:
+        statusText = 'Trip In Progress';
+        statusIcon = Icons.directions_car;
+        statusColor = AppColors.info;
+        break;
+      case RidePhase.completed:
+        statusText = 'Trip Completed';
+        statusIcon = Icons.check_circle;
+        statusColor = AppColors.success;
+        break;
+    }
+    
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
       decoration: BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.circular(30),
         boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-          ),
+          BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10),
         ],
       ),
       child: Row(
@@ -709,20 +1147,20 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
           Container(
             padding: const EdgeInsets.all(4),
             decoration: BoxDecoration(
-              color: AppColors.success.withOpacity(0.2),
+              color: statusColor.withOpacity(0.2),
               shape: BoxShape.circle,
             ),
-            child: const Icon(Icons.navigation,
-                color: AppColors.success, size: 16),
+            child: Icon(
+              statusIcon,
+              color: statusColor,
+              size: 16,
+            ),
           ),
           const SizedBox(width: 10),
-          const Flexible(
+          Flexible(
             child: Text(
-              'En Route to Pickup',
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: 15,
-              ),
+              statusText,
+              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
               overflow: TextOverflow.ellipsis,
             ),
           ),
@@ -738,10 +1176,7 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 10,
-          ),
+          BoxShadow(color: Colors.black.withOpacity(0.1), blurRadius: 10),
         ],
       ),
       child: Column(
@@ -755,9 +1190,10 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
           const SizedBox(height: 8),
           _buildStatItem(
             icon: Icons.straighten,
-            value: _distanceToPickup >= 1
-                ? _distanceToPickup.toStringAsFixed(1)
-                : (_distanceToPickup * 1000).toStringAsFixed(0),
+            value:
+                _distanceToPickup >= 1
+                    ? _distanceToPickup.toStringAsFixed(1)
+                    : (_distanceToPickup * 1000).toStringAsFixed(0),
             unit: _distanceToPickup >= 1 ? 'km' : 'm',
             color: AppColors.info,
           ),
@@ -817,16 +1253,13 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
               width: 26,
               height: 26,
               decoration: BoxDecoration(
-                color: stage.isCompleted
-                    ? AppColors.success
-                    : Colors.grey.shade300,
+                color:
+                    stage.isCompleted
+                        ? AppColors.success
+                        : Colors.grey.shade300,
                 shape: BoxShape.circle,
               ),
-              child: Icon(
-                stage.icon,
-                color: Colors.white,
-                size: 14,
-              ),
+              child: Icon(stage.icon, color: Colors.white, size: 14),
             );
           }
         }),
@@ -850,12 +1283,18 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
                 child: CircleAvatar(
                   radius: 28,
                   backgroundColor: Colors.grey.shade200,
-                  backgroundImage: widget.ride.userPhoto != null
-                      ? NetworkImage(widget.ride.userPhoto!)
-                      : null,
-                  child: widget.ride.userPhoto == null
-                      ? const Icon(Icons.person, size: 28, color: Colors.grey)
-                      : null,
+                  backgroundImage:
+                      widget.ride.userPhoto != null
+                          ? NetworkImage(widget.ride.userPhoto!)
+                          : null,
+                  child:
+                      widget.ride.userPhoto == null
+                          ? const Icon(
+                            Icons.person,
+                            size: 28,
+                            color: Colors.grey,
+                          )
+                          : null,
                 ),
               ),
             ],
@@ -876,10 +1315,7 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
                 const SizedBox(height: 2),
                 const Text(
                   'Passenger',
-                  style: TextStyle(
-                    color: Colors.grey,
-                    fontSize: 13,
-                  ),
+                  style: TextStyle(color: Colors.grey, fontSize: 13),
                 ),
               ],
             ),
@@ -931,8 +1367,11 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
               color: AppColors.success.withOpacity(0.1),
               borderRadius: BorderRadius.circular(12),
             ),
-            child: const Icon(Icons.trip_origin,
-                color: AppColors.success, size: 24),
+            child: const Icon(
+              Icons.trip_origin,
+              color: AppColors.success,
+              size: 24,
+            ),
           ),
           const SizedBox(width: 14),
           Expanded(
@@ -943,15 +1382,14 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
                   children: [
                     const Text(
                       'Pickup Location',
-                      style: TextStyle(
-                        color: Colors.grey,
-                        fontSize: 12,
-                      ),
+                      style: TextStyle(color: Colors.grey, fontSize: 12),
                     ),
                     const SizedBox(width: 8),
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 8, vertical: 2),
+                        horizontal: 8,
+                        vertical: 2,
+                      ),
                       decoration: BoxDecoration(
                         color: AppColors.primary.withOpacity(0.1),
                         borderRadius: BorderRadius.circular(8),
@@ -994,8 +1432,8 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
       tilePadding: const EdgeInsets.symmetric(horizontal: 20),
       childrenPadding: const EdgeInsets.fromLTRB(20, 0, 20, 16),
       initiallyExpanded: _showTripDetails,
-      onExpansionChanged: (expanded) =>
-          setState(() => _showTripDetails = expanded),
+      onExpansionChanged:
+          (expanded) => setState(() => _showTripDetails = expanded),
       children: [
         // Dropoff
         _buildLocationRow(
@@ -1011,8 +1449,7 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
             Expanded(
               child: _buildInfoChip(
                 icon: Icons.straighten,
-                label:
-                    '${widget.ride.distanceKm.toStringAsFixed(1)} km',
+                label: '${widget.ride.distanceKm.toStringAsFixed(1)} km',
               ),
             ),
             const SizedBox(width: 12),
@@ -1079,10 +1516,7 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
             children: [
               Text(
                 label,
-                style: TextStyle(
-                  color: Colors.grey.shade600,
-                  fontSize: 12,
-                ),
+                style: TextStyle(color: Colors.grey.shade600, fontSize: 12),
               ),
               const SizedBox(height: 2),
               Text(
@@ -1144,6 +1578,22 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
             ),
           ),
           const SizedBox(width: 12),
+          // Chat Button
+          Expanded(
+            child: OutlinedButton.icon(
+              onPressed: _messageUser,
+              icon: const Icon(Icons.chat_bubble_outline),
+              label: const Text('Chat'),
+              style: OutlinedButton.styleFrom(
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                side: BorderSide(color: Colors.grey.shade400),
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
           // Navigate Button
           Expanded(
             flex: 2,
@@ -1169,45 +1619,159 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
   }
 
   Widget _buildArrivedButton(bool canMarkArrived) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 20),
-      child: SizedBox(
-        width: double.infinity,
-        child: ElevatedButton(
-          onPressed: canMarkArrived ? _markAsArrived : null,
-          style: ElevatedButton.styleFrom(
-            backgroundColor:
-                canMarkArrived ? AppColors.success : Colors.grey.shade300,
-            foregroundColor: Colors.white,
-            padding: const EdgeInsets.symmetric(vertical: 16),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+    // Different button based on current phase
+    switch (_currentPhase) {
+      case RidePhase.enRouteToPickup:
+        // Show "I've Arrived" button
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: canMarkArrived ? _markAsArrived : null,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: canMarkArrived ? AppColors.success : Colors.grey.shade300,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                elevation: canMarkArrived ? 4 : 0,
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    canMarkArrived ? Icons.check_circle : Icons.location_on,
+                    color: canMarkArrived ? Colors.white : Colors.grey.shade600,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    canMarkArrived ? "I'VE ARRIVED" : "Get closer (${_getDistanceString()} away)",
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: canMarkArrived ? Colors.white : Colors.grey.shade600,
+                    ),
+                  ),
+                ],
+              ),
             ),
-            elevation: canMarkArrived ? 4 : 0,
           ),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                canMarkArrived ? Icons.check_circle : Icons.location_on,
-                color: canMarkArrived ? Colors.white : Colors.grey.shade600,
+        );
+
+      case RidePhase.arrivedAtPickup:
+        // Show "Start Ride" button
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: _startTrip,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.primary,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                elevation: 4,
               ),
-              const SizedBox(width: 8),
-              Text(
-                canMarkArrived
-                    ? "I'VE ARRIVED"
-                    : "Get closer (${_getDistanceString()} away)",
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: canMarkArrived ? Colors.white : Colors.grey.shade600,
-                ),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.play_arrow, color: Colors.white),
+                  SizedBox(width: 8),
+                  Text(
+                    "START RIDE",
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
               ),
-            ],
+            ),
           ),
-        ),
-      ),
-    );
+        );
+
+      case RidePhase.inProgress:
+        // Show "Complete Ride" button when close to dropoff
+        final canComplete = _distanceToDropoff < 0.2; // Within 200m of dropoff
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: canComplete ? _completeTrip : null,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: canComplete ? AppColors.success : Colors.grey.shade300,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                elevation: canComplete ? 4 : 0,
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    canComplete ? Icons.flag : Icons.navigation,
+                    color: canComplete ? Colors.white : Colors.grey.shade600,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    canComplete ? "COMPLETE RIDE" : "Navigate to dropoff (${_getDropoffDistanceString()} away)",
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: canComplete ? Colors.white : Colors.grey.shade600,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+
+      case RidePhase.completed:
+        // Show completed state
+        return Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: SizedBox(
+            width: double.infinity,
+            child: ElevatedButton(
+              onPressed: () => Navigator.pop(context),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppColors.success,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                elevation: 4,
+              ),
+              child: const Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(Icons.check_circle, color: Colors.white),
+                  SizedBox(width: 8),
+                  Text(
+                    "RIDE COMPLETED",
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: Colors.white,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+    }
+  }
+  
+  String _getDropoffDistanceString() {
+    if (_distanceToDropoff >= 1) {
+      return '${_distanceToDropoff.toStringAsFixed(1)} km';
+    } else {
+      return '${(_distanceToDropoff * 1000).toStringAsFixed(0)} m';
+    }
   }
 
   // Custom map style

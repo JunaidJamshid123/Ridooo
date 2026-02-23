@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 import '../../../../user/chat/presentation/pages/chat_screen_page.dart';
 
-/// Driver chat list page showing all driver conversations
+/// Driver chat list page showing all driver conversations - Dynamic with Supabase
 class DriverChatListPage extends StatefulWidget {
   const DriverChatListPage({super.key});
 
@@ -15,58 +17,183 @@ class _DriverChatListPageState extends State<DriverChatListPage>
   @override
   bool get wantKeepAlive => true;
 
-  // Mock chat data - TODO: Replace with actual data from backend
-  final List<ChatConversation> _conversations = [
-    ChatConversation(
-      id: '1',
-      passengerName: 'Sarah Ahmed',
-      passengerImage: null,
-      lastMessage: 'Thank you for the ride!',
-      timestamp: DateTime.now().subtract(const Duration(minutes: 5)),
-      unreadCount: 1,
-      isOnline: true,
-    ),
-    ChatConversation(
-      id: '2',
-      passengerName: 'John Smith',
-      passengerImage: null,
-      lastMessage: 'Can you wait for 2 minutes?',
-      timestamp: DateTime.now().subtract(const Duration(hours: 1)),
-      unreadCount: 0,
-      isOnline: false,
-    ),
-    ChatConversation(
-      id: '3',
-      passengerName: 'Fatima Khan',
-      passengerImage: null,
-      lastMessage: 'I\'m at the pickup location',
-      timestamp: DateTime.now().subtract(const Duration(days: 1)),
-      unreadCount: 0,
-      isOnline: false,
-    ),
-    ChatConversation(
-      id: '4',
-      passengerName: 'Mike Johnson',
-      passengerImage: null,
-      lastMessage: 'Great service, thanks!',
-      timestamp: DateTime.now().subtract(const Duration(days: 2)),
-      unreadCount: 0,
-      isOnline: true,
-    ),
-    ChatConversation(
-      id: '5',
-      passengerName: 'Aisha Ali',
-      passengerImage: null,
-      lastMessage: 'See you soon',
-      timestamp: DateTime.now().subtract(const Duration(days: 3)),
-      unreadCount: 0,
-      isOnline: false,
-    ),
-  ];
+  final _supabase = Supabase.instance.client;
+  List<ChatConversation> _conversations = [];
+  bool _isLoading = true;
+  StreamSubscription? _subscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadConversations();
+    _subscribeToMessages();
+  }
+
+  @override
+  void dispose() {
+    _subscription?.cancel();
+    super.dispose();
+  }
+
+  Future<void> _loadConversations() async {
+    try {
+      final driverId = _supabase.auth.currentUser?.id;
+      if (driverId == null) {
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      // Optimized: Single query with JOIN to get accepted offers with ride and user info
+      final offersResponse = await _supabase
+          .from('driver_offers')
+          .select('''
+            ride_id, 
+            created_at,
+            ride:ride_id(
+              id, 
+              user_id, 
+              status, 
+              pickup_address, 
+              dropoff_address, 
+              created_at,
+              user:user_id(name, phone_number, profile_image)
+            )
+          ''')
+          .eq('driver_id', driverId)
+          .eq('status', 'accepted')
+          .order('created_at', ascending: false)
+          .limit(50);
+
+      final Map<String, ChatConversation> conversationsMap = {};
+      final List<String> rideIds = [];
+      
+      // First pass: collect data from the join query
+      for (final offer in offersResponse as List) {
+        final rideData = offer['ride'];
+        if (rideData == null) continue;
+        
+        final rideId = rideData['id'] as String;
+        
+        // Skip if already processed
+        if (conversationsMap.containsKey(rideId)) continue;
+        
+        // Only show active/recent rides
+        final rideStatus = rideData['status'] as String;
+        if (!['accepted', 'arrived', 'in_progress', 'completed'].contains(rideStatus)) continue;
+        
+        final passengerId = rideData['user_id'] as String;
+        final userData = rideData['user'];
+        
+        // Get user info from joined data
+        String passengerName = '';
+        String? passengerImage;
+        
+        if (userData != null && userData is Map) {
+          passengerName = userData['name'] as String? ?? '';
+          passengerImage = userData['profile_image'] as String?;
+        }
+        
+        // If name still empty, use a friendly fallback
+        if (passengerName.isEmpty) {
+          passengerName = 'Passenger';
+        }
+        
+        rideIds.add(rideId);
+        
+        conversationsMap[rideId] = ChatConversation(
+          id: rideId,
+          passengerId: passengerId,
+          rideId: rideId,
+          passengerName: passengerName,
+          passengerImage: passengerImage,
+          lastMessage: 'Start a conversation',
+          timestamp: DateTime.parse(rideData['created_at'] as String),
+          unreadCount: 0,
+          isOnline: true,
+        );
+      }
+      
+      // Batch fetch: Get last messages and unread counts for all rides at once
+      if (rideIds.isNotEmpty) {
+        // Get all messages for these rides in one query
+        final allMessages = await _supabase
+            .from('chat_messages')
+            .select('ride_id, content, created_at, receiver_id, is_read')
+            .inFilter('ride_id', rideIds)
+            .order('created_at', ascending: false);
+        
+        // Process messages: find last message and unread count per ride
+        final Map<String, Map<String, dynamic>> lastMessages = {};
+        final Map<String, int> unreadCounts = {};
+        
+        for (final msg in allMessages as List) {
+          final rideId = msg['ride_id'] as String;
+          
+          // Track last message per ride
+          if (!lastMessages.containsKey(rideId)) {
+            lastMessages[rideId] = msg;
+          }
+          
+          // Count unread messages for this driver
+          if (msg['receiver_id'] == driverId && msg['is_read'] == false) {
+            unreadCounts[rideId] = (unreadCounts[rideId] ?? 0) + 1;
+          }
+        }
+        
+        // Update conversations with message data
+        for (final rideId in conversationsMap.keys) {
+          final conversation = conversationsMap[rideId]!;
+          final lastMsg = lastMessages[rideId];
+          
+          conversationsMap[rideId] = ChatConversation(
+            id: conversation.id,
+            passengerId: conversation.passengerId,
+            rideId: conversation.rideId,
+            passengerName: conversation.passengerName,
+            passengerImage: conversation.passengerImage,
+            lastMessage: lastMsg?['content'] as String? ?? 'Start a conversation',
+            timestamp: lastMsg != null
+                ? DateTime.parse(lastMsg['created_at'] as String)
+                : conversation.timestamp,
+            unreadCount: unreadCounts[rideId] ?? 0,
+            isOnline: true,
+          );
+        }
+      }
+
+      // Sort by timestamp (most recent first)
+      final conversations = conversationsMap.values.toList()
+        ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
+
+      if (mounted) {
+        setState(() {
+          _conversations = conversations;
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading conversations: $e');
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  void _subscribeToMessages() {
+    final driverId = _supabase.auth.currentUser?.id;
+    if (driverId == null) return;
+
+    _subscription = _supabase
+        .from('chat_messages')
+        .stream(primaryKey: ['id'])
+        .listen((List<Map<String, dynamic>> data) {
+          _loadConversations();
+        });
+  }
 
   @override
   Widget build(BuildContext context) {
-    super.build(context); // Required for AutomaticKeepAliveClientMixin
+    super.build(context);
     return Scaffold(
       backgroundColor: Colors.grey.shade50,
       appBar: AppBar(
@@ -81,22 +208,25 @@ class _DriverChatListPageState extends State<DriverChatListPage>
         surfaceTintColor: Colors.white,
         actions: [
           IconButton(
-            onPressed: () {
-              // TODO: Search chats
-            },
-            icon: const Icon(Icons.search),
+            onPressed: _loadConversations,
+            icon: const Icon(Icons.refresh),
           ),
         ],
       ),
-      body: _conversations.isEmpty
-          ? _buildEmptyState()
-          : ListView.builder(
-              itemCount: _conversations.length,
-              itemBuilder: (context, index) {
-                final conversation = _conversations[index];
-                return _buildChatItem(conversation);
-              },
-            ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _conversations.isEmpty
+              ? _buildEmptyState()
+              : RefreshIndicator(
+                  onRefresh: _loadConversations,
+                  child: ListView.builder(
+                    itemCount: _conversations.length,
+                    itemBuilder: (context, index) {
+                      final conversation = _conversations[index];
+                      return _buildChatItem(conversation);
+                    },
+                  ),
+                ),
     );
   }
 
@@ -117,8 +247,10 @@ class _DriverChatListPageState extends State<DriverChatListPage>
               context,
               MaterialPageRoute(
                 builder: (context) => ChatScreenPage(
-                  driverName: conversation.passengerName,
-                  driverImage: conversation.passengerImage,
+                  recipientId: conversation.passengerId ?? '',
+                  recipientName: conversation.passengerName,
+                  recipientImage: conversation.passengerImage,
+                  rideId: conversation.rideId,
                   isOnline: conversation.isOnline,
                 ),
               ),
@@ -310,6 +442,8 @@ class _DriverChatListPageState extends State<DriverChatListPage>
 // Chat Conversation Model
 class ChatConversation {
   final String id;
+  final String? passengerId;
+  final String? rideId;
   final String passengerName;
   final String? passengerImage;
   final String lastMessage;
@@ -319,6 +453,8 @@ class ChatConversation {
 
   ChatConversation({
     required this.id,
+    this.passengerId,
+    this.rideId,
     required this.passengerName,
     this.passengerImage,
     required this.lastMessage,

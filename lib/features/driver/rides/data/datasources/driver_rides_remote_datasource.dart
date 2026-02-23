@@ -74,6 +74,12 @@ abstract class DriverRidesRemoteDataSource {
     required String rideId,
     required String otp,
   });
+
+  /// Start the trip (simplified, no OTP)
+  Future<RideModel> startTrip({required String rideId});
+
+  /// Complete the trip
+  Future<RideModel> completeTrip({required String rideId});
 }
 
 class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
@@ -101,20 +107,20 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
         return [];
       }
 
-      final rides = (response as List)
-          .map((json) => RideModel.fromJson(json))
-          .toList();
+      final rides =
+          (response as List).map((json) => RideModel.fromJson(json)).toList();
 
       // Filter by distance (simple approach - could use PostGIS functions for better performance)
-      final nearbyRides = rides.where((ride) {
-        final distance = _calculateDistance(
-          driverLat,
-          driverLng,
-          ride.pickupLatitude,
-          ride.pickupLongitude,
-        );
-        return distance <= radiusKm;
-      }).toList();
+      final nearbyRides =
+          rides.where((ride) {
+            final distance = _calculateDistance(
+              driverLat,
+              driverLng,
+              ride.pickupLatitude,
+              ride.pickupLongitude,
+            );
+            return distance <= radiusKm;
+          }).toList();
 
       return nearbyRides;
     } catch (e) {
@@ -155,11 +161,12 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
         message: message,
       );
 
-      final response = await supabase
-          .from(ApiConstants.driverOffersTable)
-          .insert(offerData)
-          .select()
-          .single();
+      final response =
+          await supabase
+              .from(ApiConstants.driverOffersTable)
+              .insert(offerData)
+              .select()
+              .single();
 
       return DriverOfferModel.fromJson(response);
     } on PostgrestException catch (e) {
@@ -176,14 +183,15 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
   Future<DriverOfferModel?> getActiveOffer(String driverId) async {
     try {
       // Get the most recent offer that is either pending or accepted
-      final response = await supabase
-          .from(ApiConstants.driverOffersTable)
-          .select()
-          .eq('driver_id', driverId)
-          .inFilter('status', ['pending', 'accepted'])
-          .order('created_at', ascending: false)
-          .limit(1)
-          .maybeSingle();
+      final response =
+          await supabase
+              .from(ApiConstants.driverOffersTable)
+              .select()
+              .eq('driver_id', driverId)
+              .inFilter('status', ['pending', 'accepted'])
+              .order('created_at', ascending: false)
+              .limit(1)
+              .maybeSingle();
 
       if (response == null) return null;
 
@@ -231,9 +239,10 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
         'updated_at': DateTime.now().toIso8601String(),
       };
 
+      // Use upsert with onConflict to handle existing records
       await supabase
           .from(ApiConstants.driverLocationsTable)
-          .upsert(locationData);
+          .upsert(locationData, onConflict: 'driver_id');
     } catch (e) {
       throw ServerException('Failed to update location: $e');
     }
@@ -242,11 +251,12 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
   @override
   Future<bool> getOnlineStatus(String driverId) async {
     try {
-      final response = await supabase
-          .from(ApiConstants.driverLocationsTable)
-          .select('is_online')
-          .eq('driver_id', driverId)
-          .maybeSingle();
+      final response =
+          await supabase
+              .from(ApiConstants.driverLocationsTable)
+              .select('is_online')
+              .eq('driver_id', driverId)
+              .maybeSingle();
 
       if (response == null) return false;
 
@@ -264,20 +274,21 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
     try {
       // Generate a 4-digit OTP
       final otp = (1000 + Random().nextInt(9000)).toString();
-      
-      final response = await supabase
-          .from(ApiConstants.ridesTable)
-          .update({
-            'status': 'arrived',
-            'otp': otp,
-            'arrived_at': DateTime.now().toIso8601String(),
-            'updated_at': DateTime.now().toIso8601String(),
-          })
-          .eq('id', rideId)
-          .eq('driver_id', driverId)
-          .eq('status', 'accepted')
-          .select()
-          .single();
+
+      final response =
+          await supabase
+              .from(ApiConstants.ridesTable)
+              .update({
+                'status': 'arrived',
+                'otp': otp,
+                'arrived_at': DateTime.now().toIso8601String(),
+                'updated_at': DateTime.now().toIso8601String(),
+              })
+              .eq('id', rideId)
+              .eq('driver_id', driverId)
+              .eq('status', 'accepted')
+              .select()
+              .single();
 
       return RideModel.fromJson(response);
     } catch (e) {
@@ -292,20 +303,21 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
     String? reason,
   }) async {
     try {
-      final response = await supabase
-          .from(ApiConstants.ridesTable)
-          .update({
-            'status': 'cancelled',
-            'cancellation_reason': reason ?? 'Cancelled by driver',
-            'cancelled_by': 'driver',
-            'cancelled_at': DateTime.now().toIso8601String(),
-            'updated_at': DateTime.now().toIso8601String(),
-          })
-          .eq('id', rideId)
-          .eq('driver_id', driverId)
-          .inFilter('status', ['accepted', 'arrived'])
-          .select()
-          .single();
+      final response =
+          await supabase
+              .from(ApiConstants.ridesTable)
+              .update({
+                'status': 'cancelled',
+                'cancellation_reason': reason ?? 'Cancelled by driver',
+                'cancelled_by': 'driver',
+                'cancelled_at': DateTime.now().toIso8601String(),
+                'updated_at': DateTime.now().toIso8601String(),
+              })
+              .eq('id', rideId)
+              .eq('driver_id', driverId)
+              .inFilter('status', ['accepted', 'arrived'])
+              .select()
+              .single();
 
       return RideModel.fromJson(response);
     } catch (e) {
@@ -316,14 +328,15 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
   @override
   Future<RideModel?> getActiveRide(String driverId) async {
     try {
-      final response = await supabase
-          .from(ApiConstants.ridesTable)
-          .select('*, user:user_id(name, phone_number, profile_image)')
-          .eq('driver_id', driverId)
-          .inFilter('status', ['accepted', 'arrived', 'in_progress'])
-          .order('created_at', ascending: false)
-          .limit(1)
-          .maybeSingle();
+      final response =
+          await supabase
+              .from(ApiConstants.ridesTable)
+              .select('*, user:user_id(name, phone_number, profile_image)')
+              .eq('driver_id', driverId)
+              .inFilter('status', ['accepted', 'arrived', 'in_progress'])
+              .order('created_at', ascending: false)
+              .limit(1)
+              .maybeSingle();
 
       if (response == null) return null;
 
@@ -336,11 +349,12 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
   @override
   Future<RideModel> getRideById(String rideId) async {
     try {
-      final response = await supabase
-          .from(ApiConstants.ridesTable)
-          .select('*, user:user_id(name, phone_number, profile_image)')
-          .eq('id', rideId)
-          .single();
+      final response =
+          await supabase
+              .from(ApiConstants.ridesTable)
+              .select('*, user:user_id(name, phone_number, profile_image)')
+              .eq('id', rideId)
+              .single();
 
       return RideModel.fromJson(response);
     } catch (e) {
@@ -355,26 +369,28 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
   }) async {
     try {
       // Verify OTP matches
-      final rideCheck = await supabase
-          .from(ApiConstants.ridesTable)
-          .select('otp')
-          .eq('id', rideId)
-          .single();
+      final rideCheck =
+          await supabase
+              .from(ApiConstants.ridesTable)
+              .select('otp')
+              .eq('id', rideId)
+              .single();
 
       if (rideCheck['otp'] != otp) {
         throw ServerException('Invalid OTP');
       }
 
       // Update ride status to in_progress
-      final response = await supabase
-          .from(ApiConstants.ridesTable)
-          .update({
-            'status': 'in_progress',
-            'started_at': DateTime.now().toIso8601String(),
-          })
-          .eq('id', rideId)
-          .select('*, user:user_id(name, phone_number, profile_image)')
-          .single();
+      final response =
+          await supabase
+              .from(ApiConstants.ridesTable)
+              .update({
+                'status': 'in_progress',
+                'started_at': DateTime.now().toIso8601String(),
+              })
+              .eq('id', rideId)
+              .select('*, user:user_id(name, phone_number, profile_image)')
+              .single();
 
       return RideModel.fromJson(response);
     } catch (e) {
@@ -383,14 +399,79 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
     }
   }
 
+  @override
+  Future<RideModel> startTrip({required String rideId}) async {
+    try {
+      // Update ride status to in_progress
+      final response =
+          await supabase
+              .from(ApiConstants.ridesTable)
+              .update({
+                'status': 'in_progress',
+                'started_at': DateTime.now().toIso8601String(),
+              })
+              .eq('id', rideId)
+              .select('*, user:user_id(name, phone_number, profile_image)')
+              .single();
+
+      return RideModel.fromJson(response);
+    } catch (e) {
+      throw ServerException('Failed to start trip: $e');
+    }
+  }
+
+  @override
+  Future<RideModel> completeTrip({required String rideId}) async {
+    try {
+      // Get the accepted offer's price for this ride
+      final offerResponse = await supabase
+          .from('driver_offers')
+          .select('offered_price')
+          .eq('ride_id', rideId)
+          .eq('status', 'accepted')
+          .maybeSingle();
+      
+      final finalFare = offerResponse?['offered_price'] as num?;
+      
+      // Update ride status to completed with final fare
+      final updateData = <String, dynamic>{
+        'status': 'completed',
+        'completed_at': DateTime.now().toIso8601String(),
+      };
+      
+      if (finalFare != null) {
+        updateData['final_fare'] = finalFare;
+        updateData['actual_fare'] = finalFare;
+      }
+      
+      final response =
+          await supabase
+              .from(ApiConstants.ridesTable)
+              .update(updateData)
+              .eq('id', rideId)
+              .select('*, user:user_id(name, phone_number, profile_image)')
+              .single();
+
+      return RideModel.fromJson(response);
+    } catch (e) {
+      throw ServerException('Failed to complete trip: $e');
+    }
+  }
+
   /// Calculate distance between two points using Haversine formula
-  double _calculateDistance(double lat1, double lon1, double lat2, double lon2) {
+  double _calculateDistance(
+    double lat1,
+    double lon1,
+    double lat2,
+    double lon2,
+  ) {
     const double earthRadius = 6371; // km
 
     final dLat = _toRadians(lat2 - lat1);
     final dLon = _toRadians(lon2 - lon1);
 
-    final a = sin(dLat / 2) * sin(dLat / 2) +
+    final a =
+        sin(dLat / 2) * sin(dLat / 2) +
         cos(_toRadians(lat1)) *
             cos(_toRadians(lat2)) *
             sin(dLon / 2) *

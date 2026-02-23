@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../../../../core/services/wallet_service.dart';
 
 /// Clean and simple payment/wallet page for users
 class UserPaymentPage extends StatefulWidget {
@@ -14,7 +16,10 @@ class _UserPaymentPageState extends State<UserPaymentPage>
   @override
   bool get wantKeepAlive => true;
 
-  double _walletBalance = 1250.0;
+  double _walletBalance = 0.0;
+  bool _isLoading = true;
+  List<Map<String, dynamic>> _transactions = [];
+  late final WalletService _walletService;
   
   // Mock payment methods
   final List<PaymentMethod> _paymentMethods = [
@@ -22,7 +27,7 @@ class _UserPaymentPageState extends State<UserPaymentPage>
       id: '1',
       type: PaymentMethodType.wallet,
       name: 'Ridooo Wallet',
-      details: 'Rs. 1,250.00',
+      details: 'Rs. 0.00',
       icon: Icons.account_balance_wallet,
       iconColor: Colors.purple,
       isDefault: true,
@@ -57,6 +62,39 @@ class _UserPaymentPageState extends State<UserPaymentPage>
   ];
 
   @override
+  void initState() {
+    super.initState();
+    _walletService = WalletService(supabaseClient: Supabase.instance.client);
+    _loadWalletData();
+  }
+
+  Future<void> _loadWalletData() async {
+    try {
+      final user = Supabase.instance.client.auth.currentUser;
+      if (user == null) return;
+
+      final wallet = await _walletService.getOrCreateWallet(user.id);
+      final transactions = await _walletService.getTransactions(user.id, limit: 10);
+
+      if (mounted) {
+        setState(() {
+          _walletBalance = (wallet['balance'] as num?)?.toDouble() ?? 0.0;
+          _transactions = transactions;
+          _paymentMethods[0] = _paymentMethods[0].copyWith(
+            details: 'Rs. ${_walletBalance.toStringAsFixed(2)}',
+          );
+          _isLoading = false;
+        });
+      }
+    } catch (e) {
+      print('Error loading wallet data: $e');
+      if (mounted) {
+        setState(() => _isLoading = false);
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
     return Scaffold(
@@ -78,30 +116,111 @@ class _UserPaymentPageState extends State<UserPaymentPage>
         actions: [
           IconButton(
             icon: const Icon(Icons.history_rounded),
-            onPressed: () {
-              // TODO: Show transaction history
-            },
+            onPressed: _showTransactionHistory,
           ),
         ],
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // Wallet Balance Card
-            _buildWalletCard(),
-            const SizedBox(height: 24),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : RefreshIndicator(
+              onRefresh: _loadWalletData,
+              child: SingleChildScrollView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // Wallet Balance Card
+                    _buildWalletCard(),
+                    const SizedBox(height: 24),
 
-            // Quick Actions
-            _buildQuickActions(),
-            const SizedBox(height: 28),
+                    // Quick Actions
+                    _buildQuickActions(),
+                    const SizedBox(height: 28),
 
-            // Payment Methods Section
-            _buildSectionHeader('Payment Methods'),
-            const SizedBox(height: 12),
-            _buildPaymentMethods(),
-          ],
+                    // Payment Methods Section
+                    _buildSectionHeader('Payment Methods'),
+                    const SizedBox(height: 12),
+                    _buildPaymentMethods(),
+                  ],
+                ),
+              ),
+            ),
+    );
+  }
+
+  void _showTransactionHistory() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (context) => DraggableScrollableSheet(
+        initialChildSize: 0.7,
+        minChildSize: 0.5,
+        maxChildSize: 0.95,
+        builder: (context, scrollController) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          child: Column(
+            children: [
+              Container(
+                margin: const EdgeInsets.only(top: 12),
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'Transaction History',
+                  style: TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              Expanded(
+                child: _transactions.isEmpty
+                    ? const Center(child: Text('No transactions yet'))
+                    : ListView.builder(
+                        controller: scrollController,
+                        itemCount: _transactions.length,
+                        padding: const EdgeInsets.all(16),
+                        itemBuilder: (context, index) {
+                          final tx = _transactions[index];
+                          final isCredit = tx['type'] == 'credit';
+                          return ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: isCredit 
+                                  ? Colors.green.shade100 
+                                  : Colors.red.shade100,
+                              child: Icon(
+                                isCredit ? Icons.add : Icons.remove,
+                                color: isCredit ? Colors.green : Colors.red,
+                              ),
+                            ),
+                            title: Text(tx['description'] ?? 'Transaction'),
+                            subtitle: Text(
+                              DateTime.parse(tx['created_at']).toString().substring(0, 16),
+                            ),
+                            trailing: Text(
+                              '${isCredit ? '+' : '-'}Rs. ${(tx['amount'] as num).toStringAsFixed(2)}',
+                              style: TextStyle(
+                                color: isCredit ? Colors.green : Colors.red,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -589,21 +708,51 @@ class _UserPaymentPageState extends State<UserPaymentPage>
               child: const Text('Cancel'),
             ),
             ElevatedButton(
-              onPressed: () {
+              onPressed: () async {
                 final amount = double.tryParse(amountController.text);
                 if (amount != null && amount > 0) {
-                  setState(() {
-                    _walletBalance += amount;
-                    _paymentMethods[0].details =
-                        'Rs. ${_walletBalance.toStringAsFixed(2)}';
-                  });
                   Navigator.pop(context);
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text('Rs. $amount added successfully'),
-                      backgroundColor: Colors.green,
-                    ),
-                  );
+                  
+                  // Show loading
+                  if (mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Processing...')),
+                    );
+                  }
+
+                  try {
+                    final user = Supabase.instance.client.auth.currentUser;
+                    if (user != null) {
+                      await _walletService.addMoney(
+                        userId: user.id,
+                        amount: amount,
+                        description: 'Wallet top-up',
+                      );
+                      
+                      // Reload wallet data
+                      await _loadWalletData();
+                      
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          SnackBar(
+                            content: Text('Rs. ${amount.toStringAsFixed(2)} added successfully'),
+                            backgroundColor: Colors.green,
+                          ),
+                        );
+                      }
+                    }
+                  } catch (e) {
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text('Failed to add money: $e'),
+                          backgroundColor: Colors.red,
+                        ),
+                      );
+                    }
+                  }
                 }
               },
               style: ElevatedButton.styleFrom(
@@ -1150,6 +1299,26 @@ class PaymentMethod {
     required this.iconColor,
     required this.isDefault,
   });
+
+  PaymentMethod copyWith({
+    String? id,
+    PaymentMethodType? type,
+    String? name,
+    String? details,
+    IconData? icon,
+    Color? iconColor,
+    bool? isDefault,
+  }) {
+    return PaymentMethod(
+      id: id ?? this.id,
+      type: type ?? this.type,
+      name: name ?? this.name,
+      details: details ?? this.details,
+      icon: icon ?? this.icon,
+      iconColor: iconColor ?? this.iconColor,
+      isDefault: isDefault ?? this.isDefault,
+    );
+  }
 }
 
 enum PaymentMethodType {

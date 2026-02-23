@@ -7,7 +7,6 @@ import '../../domain/repositories/driver_rides_repository.dart';
 import '../../../../user/booking/data/models/ride_model.dart';
 import '../../../../user/booking/data/models/driver_offer_model.dart';
 import '../../../../user/booking/domain/entities/ride.dart';
-import '../../../../user/booking/domain/entities/driver_offer.dart';
 import 'driver_rides_event.dart';
 import 'driver_rides_state.dart';
 
@@ -63,6 +62,8 @@ class DriverRidesBloc extends Bloc<DriverRidesEvent, DriverRidesState> {
     on<LoadActiveRide>(_onLoadActiveRide);
     on<ActiveRideUpdated>(_onActiveRideUpdated);
     on<VerifyOtpAndStartTrip>(_onVerifyOtpAndStartTrip);
+    on<StartTrip>(_onStartTrip);
+    on<CompleteTrip>(_onCompleteTrip);
   }
 
   Future<void> _onLoadNearbyRideRequests(
@@ -529,8 +530,65 @@ class DriverRidesBloc extends Bloc<DriverRidesEvent, DriverRidesState> {
     result.fold(
       (failure) => emit(DriverRidesError(failure.message)),
       (ride) {
-        if (state is ActiveRideState) {
-          emit((state as ActiveRideState).copyWith(ride: ride));
+        if (state is ArrivedAtPickup) {
+          final currentState = state as ArrivedAtPickup;
+          emit(TripInProgress(
+            ride: ride,
+            offer: currentState.offer,
+            driverLatitude: _currentLat,
+            driverLongitude: _currentLng,
+          ));
+        } else if (state is ActiveRideState) {
+          final currentState = state as ActiveRideState;
+          emit(TripInProgress(
+            ride: ride,
+            offer: currentState.offer,
+            driverLatitude: _currentLat,
+            driverLongitude: _currentLng,
+          ));
+        }
+      },
+    );
+  }
+
+  Future<void> _onStartTrip(
+    StartTrip event,
+    Emitter<DriverRidesState> emit,
+  ) async {
+    final result = await repository.startTrip(rideId: event.rideId);
+
+    result.fold(
+      (failure) => emit(DriverRidesError(failure.message)),
+      (ride) {
+        if (state is ArrivedAtPickup) {
+          final currentState = state as ArrivedAtPickup;
+          emit(TripInProgress(
+            ride: ride,
+            offer: currentState.offer,
+            driverLatitude: _currentLat,
+            driverLongitude: _currentLng,
+          ));
+        }
+      },
+    );
+  }
+
+  Future<void> _onCompleteTrip(
+    CompleteTrip event,
+    Emitter<DriverRidesState> emit,
+  ) async {
+    final result = await repository.completeTrip(rideId: event.rideId);
+
+    result.fold(
+      (failure) => emit(DriverRidesError(failure.message)),
+      (ride) {
+        if (state is TripInProgress) {
+          final currentState = state as TripInProgress;
+          emit(TripCompleted(
+            ride: ride,
+            offer: currentState.offer,
+            earnings: currentState.offer.offeredPrice,
+          ));
         }
       },
     );

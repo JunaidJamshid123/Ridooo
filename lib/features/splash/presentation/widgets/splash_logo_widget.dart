@@ -5,44 +5,27 @@ class SplashLogoWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      crossAxisAlignment: CrossAxisAlignment.center,
+    return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
-        // "Ri" text
-        const Text(
-          'Ri',
-          style: TextStyle(
-            fontSize: 72,
-            fontWeight: FontWeight.bold,
-            color: Colors.black,
-            height: 1,
-          ),
+        // Car Image
+        Image.asset(
+          'assets/images/png/car_new.jpg',
+          width: 280,
+          height: 160,
+          fit: BoxFit.contain,
         ),
         
-        // Car icon replacing 'd'
-        Container(
-          margin: const EdgeInsets.symmetric(horizontal: 4),
-          padding: const EdgeInsets.all(8),
-          decoration: BoxDecoration(
-            color: Colors.black,
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: const Icon(
-            Icons.local_taxi_rounded,
-            size: 48,
-            color: Colors.white,
-          ),
-        ),
+        const SizedBox(height: 24),
         
-        // "ooo" text
+        // Ridooo text
         const Text(
-          'ooo',
+          'Ridooo',
           style: TextStyle(
-            fontSize: 72,
-            fontWeight: FontWeight.bold,
-            color: Colors.black,
-            height: 1,
+            fontSize: 56,
+            fontWeight: FontWeight.w900,
+            color: Color(0xFF1A1A1A),
+            letterSpacing: -2,
           ),
         ),
       ],

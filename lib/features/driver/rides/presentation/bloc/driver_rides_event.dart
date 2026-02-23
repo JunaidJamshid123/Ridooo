@@ -199,3 +199,23 @@ class VerifyOtpAndStartTrip extends DriverRidesEvent {
   @override
   List<Object?> get props => [rideId, otp];
 }
+
+/// Start the trip (simplified, no OTP)
+class StartTrip extends DriverRidesEvent {
+  final String rideId;
+
+  const StartTrip({required this.rideId});
+
+  @override
+  List<Object?> get props => [rideId];
+}
+
+/// Complete the trip
+class CompleteTrip extends DriverRidesEvent {
+  final String rideId;
+
+  const CompleteTrip({required this.rideId});
+
+  @override
+  List<Object?> get props => [rideId];
+}

@@ -212,4 +212,28 @@ class DriverRidesRepositoryImpl implements DriverRidesRepository {
       return Left(ServerFailure(e.toString()));
     }
   }
+
+  @override
+  Future<Either<Failure, Ride>> startTrip({required String rideId}) async {
+    try {
+      final ride = await remoteDataSource.startTrip(rideId: rideId);
+      return Right(ride);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
+  }
+
+  @override
+  Future<Either<Failure, Ride>> completeTrip({required String rideId}) async {
+    try {
+      final ride = await remoteDataSource.completeTrip(rideId: rideId);
+      return Right(ride);
+    } on ServerException catch (e) {
+      return Left(ServerFailure(e.message));
+    } catch (e) {
+      return Left(ServerFailure(e.toString()));
+    }
+  }
 }

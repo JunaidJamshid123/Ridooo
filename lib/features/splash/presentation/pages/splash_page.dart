@@ -4,7 +4,6 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'dart:convert';
-import '../../../../core/theme/app_colors.dart';
 import '../../../../core/config/supabase_config.dart';
 import '../../../../core/navigation/main_navigation.dart';
 import '../../../../core/navigation/driver_navigation.dart';

@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
-/// Simple and clean activity feed for users
+/// Simple and clean activity feed for users - Dynamic with Supabase
 class UserActivityPage extends StatefulWidget {
   const UserActivityPage({super.key});
 
@@ -14,82 +15,142 @@ class _UserActivityPageState extends State<UserActivityPage>
   @override
   bool get wantKeepAlive => true;
 
-  // Mock activity data - TODO: Replace with actual data from backend
-  final List<Activity> _activities = [
-    Activity(
-      type: ActivityType.login,
-      title: 'Logged in',
-      description: 'You logged into your account',
-      timestamp: DateTime.now().subtract(const Duration(minutes: 5)),
-      icon: Icons.login,
-      iconColor: Colors.blue,
-    ),
-    Activity(
-      type: ActivityType.rideBooked,
-      title: 'Ride booked',
-      description: 'Gulberg III → Model Town',
-      timestamp: DateTime.now().subtract(const Duration(hours: 2)),
-      icon: Icons.directions_car,
-      iconColor: Colors.green,
-      amount: 350.0,
-    ),
-    Activity(
-      type: ActivityType.payment,
-      title: 'Payment successful',
-      description: 'Ride payment completed',
-      timestamp: DateTime.now().subtract(const Duration(hours: 3)),
-      icon: Icons.payment,
-      iconColor: Colors.purple,
-      amount: -350.0,
-    ),
-    Activity(
-      type: ActivityType.rideCompleted,
-      title: 'Ride completed',
-      description: 'DHA Phase 5 → Airport',
-      timestamp: DateTime.now().subtract(const Duration(days: 1)),
-      icon: Icons.check_circle,
-      iconColor: Colors.green,
-      amount: 450.0,
-    ),
-    Activity(
-      type: ActivityType.walletRecharge,
-      title: 'Wallet recharged',
-      description: 'Added money to wallet',
-      timestamp: DateTime.now().subtract(const Duration(days: 2)),
-      icon: Icons.account_balance_wallet,
-      iconColor: Colors.orange,
-      amount: 1000.0,
-    ),
-    Activity(
-      type: ActivityType.rideCancelled,
-      title: 'Ride cancelled',
-      description: 'You cancelled a ride',
-      timestamp: DateTime.now().subtract(const Duration(days: 3)),
-      icon: Icons.cancel,
-      iconColor: Colors.red,
-    ),
-    Activity(
-      type: ActivityType.profileUpdated,
-      title: 'Profile updated',
-      description: 'You updated your profile picture',
-      timestamp: DateTime.now().subtract(const Duration(days: 4)),
-      icon: Icons.person,
-      iconColor: Colors.blue,
-    ),
-    Activity(
-      type: ActivityType.rideBooked,
-      title: 'Ride booked',
-      description: 'Johar Town → Liberty Market',
-      timestamp: DateTime.now().subtract(const Duration(days: 5)),
-      icon: Icons.directions_car,
-      iconColor: Colors.green,
-      amount: 280.0,
-    ),
-  ];
+  final _supabase = Supabase.instance.client;
+  List<Activity> _activities = [];
+  bool _isLoading = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadActivities();
+  }
+
+  Future<void> _loadActivities() async {
+    try {
+      final userId = _supabase.auth.currentUser?.id;
+      if (userId == null) {
+        setState(() => _isLoading = false);
+        return;
+      }
+
+      // Get user's ride history from Supabase
+      final ridesResponse = await _supabase
+          .from('rides')
+          .select('''
+            id,
+            status,
+            pickup_address,
+            dropoff_address,
+            final_fare,
+            estimated_fare,
+            created_at,
+            completed_at,
+            cancelled_at,
+            driver_offers!inner(
+              driver_name,
+              offered_price,
+              status
+            )
+          ''')
+          .eq('user_id', userId)
+          .order('created_at', ascending: false)
+          .limit(50);
+
+      final List<Activity> activities = [];
+
+      for (final ride in ridesResponse as List) {
+        final status = ride['status'] as String;
+        final pickupAddress = _shortenAddress(ride['pickup_address'] as String? ?? 'Unknown');
+        final dropoffAddress = _shortenAddress(ride['dropoff_address'] as String? ?? 'Unknown');
+        final description = '$pickupAddress → $dropoffAddress';
+        
+        // Get price from accepted offer
+        final offers = ride['driver_offers'] as List?;
+        final acceptedOffer = offers?.firstWhere(
+          (o) => o['status'] == 'accepted',
+          orElse: () => null,
+        );
+        final fare = (ride['final_fare'] ?? acceptedOffer?['offered_price'] ?? ride['estimated_fare']) as num?;
+
+        DateTime timestamp;
+        ActivityType type;
+        String title;
+        IconData icon;
+        Color iconColor;
+
+        switch (status) {
+          case 'completed':
+            type = ActivityType.rideCompleted;
+            title = 'Ride completed';
+            icon = Icons.check_circle;
+            iconColor = Colors.green;
+            timestamp = ride['completed_at'] != null 
+                ? DateTime.parse(ride['completed_at'] as String)
+                : DateTime.parse(ride['created_at'] as String);
+            break;
+          case 'cancelled':
+            type = ActivityType.rideCancelled;
+            title = 'Ride cancelled';
+            icon = Icons.cancel;
+            iconColor = Colors.red;
+            timestamp = ride['cancelled_at'] != null 
+                ? DateTime.parse(ride['cancelled_at'] as String)
+                : DateTime.parse(ride['created_at'] as String);
+            break;
+          case 'in_progress':
+            type = ActivityType.rideBooked;
+            title = 'Ride in progress';
+            icon = Icons.directions_car;
+            iconColor = Colors.blue;
+            timestamp = DateTime.parse(ride['created_at'] as String);
+            break;
+          case 'accepted':
+          case 'arrived':
+            type = ActivityType.rideBooked;
+            title = 'Ride accepted';
+            icon = Icons.directions_car;
+            iconColor = Colors.orange;
+            timestamp = DateTime.parse(ride['created_at'] as String);
+            break;
+          default:
+            type = ActivityType.rideBooked;
+            title = 'Ride requested';
+            icon = Icons.directions_car_outlined;
+            iconColor = Colors.grey;
+            timestamp = DateTime.parse(ride['created_at'] as String);
+        }
+
+        activities.add(Activity(
+          id: ride['id'] as String,
+          type: type,
+          title: title,
+          description: description,
+          timestamp: timestamp,
+          icon: icon,
+          iconColor: iconColor,
+          amount: fare?.toDouble(),
+        ));
+      }
+
+      setState(() {
+        _activities = activities;
+        _isLoading = false;
+      });
+    } catch (e) {
+      debugPrint('Error loading activities: $e');
+      setState(() => _isLoading = false);
+    }
+  }
+
+  String _shortenAddress(String address) {
+    // Take first part of address before comma
+    final parts = address.split(',');
+    return parts.isNotEmpty ? parts.first.trim() : address;
+  }
 
   @override
   Widget build(BuildContext context) {
-    super.build(context); // Required for AutomaticKeepAliveClientMixin
+    super.build(context);
     return Scaffold(
       backgroundColor: const Color(0xFFF8F9FA),
       appBar: AppBar(
@@ -108,35 +169,32 @@ class _UserActivityPageState extends State<UserActivityPage>
         surfaceTintColor: Colors.white,
         actions: [
           IconButton(
-            icon: const Icon(Icons.filter_list_rounded),
-            onPressed: () {
-              // TODO: Filter activities
-            },
+            icon: const Icon(Icons.refresh),
+            onPressed: _loadActivities,
           ),
         ],
       ),
-      body: RefreshIndicator(
-        onRefresh: () async {
-          // TODO: Refresh activities
-          await Future.delayed(const Duration(seconds: 1));
-        },
-        child: _activities.isEmpty
-            ? _buildEmptyState()
-            : ListView.builder(
-                padding: const EdgeInsets.symmetric(vertical: 8),
-                itemCount: _activities.length,
-                itemBuilder: (context, index) {
-                  final activity = _activities[index];
-                  final showDate = index == 0 ||
-                      !_isSameDay(
-                        activity.timestamp,
-                        _activities[index - 1].timestamp,
-                      );
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : RefreshIndicator(
+              onRefresh: _loadActivities,
+              child: _activities.isEmpty
+                  ? _buildEmptyState()
+                  : ListView.builder(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      itemCount: _activities.length,
+                      itemBuilder: (context, index) {
+                        final activity = _activities[index];
+                        final showDate = index == 0 ||
+                            !_isSameDay(
+                              activity.timestamp,
+                              _activities[index - 1].timestamp,
+                            );
 
-                  return Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (showDate) _buildDateHeader(activity.timestamp),
+                        return Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (showDate) _buildDateHeader(activity.timestamp),
                       _buildActivityItem(activity),
                     ],
                   );
@@ -360,6 +418,7 @@ class _UserActivityPageState extends State<UserActivityPage>
 
 // Activity model
 class Activity {
+  final String? id;
   final ActivityType type;
   final String title;
   final String description;
@@ -369,6 +428,7 @@ class Activity {
   final double? amount;
 
   Activity({
+    this.id,
     required this.type,
     required this.title,
     required this.description,

@@ -1,17 +1,24 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../../../../core/theme/app_colors.dart';
 
-/// Individual chat screen with a driver
+/// Individual chat screen with a driver - Connected to Supabase
 class ChatScreenPage extends StatefulWidget {
-  final String driverName;
-  final String? driverImage;
+  final String recipientId;
+  final String recipientName;
+  final String? recipientImage;
   final bool isOnline;
+  final String? rideId; // Optional: link to specific ride
 
   const ChatScreenPage({
     super.key,
-    required this.driverName,
-    this.driverImage,
+    required this.recipientId,
+    required this.recipientName,
+    this.recipientImage,
     this.isOnline = false,
+    this.rideId,
   });
 
   @override
@@ -21,78 +28,127 @@ class ChatScreenPage extends StatefulWidget {
 class _ChatScreenPageState extends State<ChatScreenPage> {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final SupabaseClient _supabase = Supabase.instance.client;
   
-  // Mock messages - TODO: Replace with actual data from backend
-  final List<ChatMessage> _messages = [
-    ChatMessage(
-      id: '1',
-      text: 'Hi! I\'ve booked a ride to Model Town',
-      isFromUser: true,
-      timestamp: DateTime.now().subtract(const Duration(hours: 2, minutes: 30)),
-    ),
-    ChatMessage(
-      id: '2',
-      text: 'Hello! I\'ve received your booking. I\'ll be there in 10 minutes',
-      isFromUser: false,
-      timestamp: DateTime.now().subtract(const Duration(hours: 2, minutes: 28)),
-    ),
-    ChatMessage(
-      id: '3',
-      text: 'Great! I\'ll be waiting at the main gate',
-      isFromUser: true,
-      timestamp: DateTime.now().subtract(const Duration(hours: 2, minutes: 25)),
-    ),
-    ChatMessage(
-      id: '4',
-      text: 'Perfect! I\'m 5 minutes away now',
-      isFromUser: false,
-      timestamp: DateTime.now().subtract(const Duration(hours: 2, minutes: 20)),
-    ),
-    ChatMessage(
-      id: '5',
-      text: 'I can see your car. White Honda City, right?',
-      isFromUser: true,
-      timestamp: DateTime.now().subtract(const Duration(hours: 2, minutes: 10)),
-    ),
-    ChatMessage(
-      id: '6',
-      text: 'Yes, that\'s me! I\'m right outside',
-      isFromUser: false,
-      timestamp: DateTime.now().subtract(const Duration(hours: 2, minutes: 8)),
-    ),
-    ChatMessage(
-      id: '7',
-      text: 'I\'m arriving in 2 minutes',
-      isFromUser: false,
-      timestamp: DateTime.now().subtract(const Duration(minutes: 5)),
-    ),
-  ];
+  List<ChatMessage> _messages = [];
+  bool _isLoading = true;
+  StreamSubscription? _messageSubscription;
+  String? _currentUserId;
+
+  @override
+  void initState() {
+    super.initState();
+    _currentUserId = _supabase.auth.currentUser?.id;
+    _loadMessages();
+    _subscribeToMessages();
+  }
 
   @override
   void dispose() {
     _messageController.dispose();
     _scrollController.dispose();
+    _messageSubscription?.cancel();
     super.dispose();
   }
-
-  void _sendMessage() {
-    final text = _messageController.text.trim();
-    if (text.isEmpty) return;
-
-    setState(() {
-      _messages.add(
-        ChatMessage(
-          id: DateTime.now().toString(),
-          text: text,
-          isFromUser: true,
-          timestamp: DateTime.now(),
-        ),
-      );
-    });
-
-    _messageController.clear();
+  
+  Future<void> _loadMessages() async {
+    if (_currentUserId == null) return;
     
-    // Scroll to bottom
+    try {
+      // Get messages between current user and recipient for this ride
+      var query = _supabase
+          .from('chat_messages')
+          .select()
+          .or('and(sender_id.eq.$_currentUserId,receiver_id.eq.${widget.recipientId}),and(sender_id.eq.${widget.recipientId},receiver_id.eq.$_currentUserId)');
+      
+      // Filter by ride_id if provided
+      if (widget.rideId != null) {
+        query = query.eq('ride_id', widget.rideId!);
+      }
+      
+      final response = await query
+          .order('created_at', ascending: true)
+          .limit(100);
+      
+      setState(() {
+        _messages = (response as List).map((json) => ChatMessage(
+          id: json['id'] as String,
+          text: json['content'] as String,
+          isFromUser: json['sender_id'] == _currentUserId,
+          timestamp: DateTime.parse(json['created_at'] as String),
+        )).toList();
+        _isLoading = false;
+      });
+      
+      _scrollToBottom();
+    } catch (e) {
+      debugPrint('Error loading messages: $e');
+      setState(() => _isLoading = false);
+    }
+  }
+  
+  void _subscribeToMessages() {
+    if (_currentUserId == null) return;
+    
+    // Subscribe to new messages
+    _supabase
+        .channel('chat_${_currentUserId}_${widget.recipientId}')
+        .onPostgresChanges(
+          event: PostgresChangeEvent.insert,
+          schema: 'public',
+          table: 'chat_messages',
+          callback: (payload) {
+            final newMessage = payload.newRecord;
+            // Check if this message is for this conversation
+            final senderId = newMessage['sender_id'];
+            final receiverId = newMessage['receiver_id'];
+            final messageId = newMessage['id'] as String;
+            
+            if ((senderId == _currentUserId && receiverId == widget.recipientId) ||
+                (senderId == widget.recipientId && receiverId == _currentUserId)) {
+              // Check for ride_id filter
+              if (widget.rideId != null && newMessage['ride_id'] != widget.rideId) {
+                return;
+              }
+              
+              // Avoid duplicates - check if message already exists (from optimistic update)
+              final existingIndex = _messages.indexWhere((m) => 
+                  m.id == messageId || 
+                  (m.text == newMessage['content'] as String && 
+                   m.isFromUser && 
+                   senderId == _currentUserId &&
+                   m.timestamp.difference(DateTime.parse(newMessage['created_at'] as String)).inSeconds.abs() < 5)
+              );
+              
+              if (existingIndex == -1) {
+                // New message from recipient
+                setState(() {
+                  _messages.add(ChatMessage(
+                    id: messageId,
+                    text: newMessage['content'] as String,
+                    isFromUser: newMessage['sender_id'] == _currentUserId,
+                    timestamp: DateTime.parse(newMessage['created_at'] as String),
+                  ));
+                });
+                _scrollToBottom();
+              } else if (_messages[existingIndex].id != messageId) {
+                // Update the optimistic message with the real ID
+                setState(() {
+                  _messages[existingIndex] = ChatMessage(
+                    id: messageId,
+                    text: newMessage['content'] as String,
+                    isFromUser: newMessage['sender_id'] == _currentUserId,
+                    timestamp: DateTime.parse(newMessage['created_at'] as String),
+                  );
+                });
+              }
+            }
+          },
+        )
+        .subscribe();
+  }
+  
+  void _scrollToBottom() {
     Future.delayed(const Duration(milliseconds: 100), () {
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -102,33 +158,46 @@ class _ChatScreenPageState extends State<ChatScreenPage> {
         );
       }
     });
+  }
 
-    // Simulate driver response (for demo)
-    Future.delayed(const Duration(seconds: 2), () {
-      if (mounted) {
-        setState(() {
-          _messages.add(
-            ChatMessage(
-              id: DateTime.now().toString(),
-              text: 'Got it, thanks!',
-              isFromUser: false,
-              timestamp: DateTime.now(),
-            ),
-          );
-        });
-        
-        // Scroll to bottom after response
-        Future.delayed(const Duration(milliseconds: 100), () {
-          if (_scrollController.hasClients) {
-            _scrollController.animateTo(
-              _scrollController.position.maxScrollExtent,
-              duration: const Duration(milliseconds: 300),
-              curve: Curves.easeOut,
-            );
-          }
-        });
-      }
+  Future<void> _sendMessage() async {
+    final text = _messageController.text.trim();
+    if (text.isEmpty || _currentUserId == null) return;
+
+    _messageController.clear();
+    
+    // Optimistically add message
+    final tempMessage = ChatMessage(
+      id: DateTime.now().toString(),
+      text: text,
+      isFromUser: true,
+      timestamp: DateTime.now(),
+    );
+    
+    setState(() {
+      _messages.add(tempMessage);
     });
+    _scrollToBottom();
+
+    try {
+      // Insert message to Supabase
+      await _supabase.from('chat_messages').insert({
+        'sender_id': _currentUserId,
+        'receiver_id': widget.recipientId,
+        'content': text,
+        'ride_id': widget.rideId,
+        'message_type': 'text',
+        'is_read': false,
+      });
+    } catch (e) {
+      debugPrint('Error sending message: $e');
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Failed to send message: $e'),
+          backgroundColor: AppColors.error,
+        ),
+      );
+    }
   }
 
   @override
@@ -150,14 +219,17 @@ class _ChatScreenPageState extends State<ChatScreenPage> {
                 CircleAvatar(
                   radius: 20,
                   backgroundColor: Colors.grey.shade200,
-                  child: Text(
-                    widget.driverName[0].toUpperCase(),
+                  backgroundImage: widget.recipientImage != null 
+                      ? NetworkImage(widget.recipientImage!)
+                      : null,
+                  child: widget.recipientImage == null ? Text(
+                    widget.recipientName.isNotEmpty ? widget.recipientName[0].toUpperCase() : '?',
                     style: const TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.w600,
                       color: Color(0xFF1A1A1A),
                     ),
-                  ),
+                  ) : null,
                 ),
                 if (widget.isOnline)
                   Positioned(
@@ -181,7 +253,7 @@ class _ChatScreenPageState extends State<ChatScreenPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    widget.driverName,
+                    widget.recipientName,
                     style: const TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w600,
@@ -204,14 +276,14 @@ class _ChatScreenPageState extends State<ChatScreenPage> {
             icon: const Icon(Icons.phone),
             onPressed: () {
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Calling driver...')),
+                const SnackBar(content: Text('Calling...')),
               );
             },
           ),
           IconButton(
             icon: const Icon(Icons.more_vert),
             onPressed: () {
-              // TODO: Show more options
+              // Show more options
             },
           ),
         ],
@@ -220,28 +292,49 @@ class _ChatScreenPageState extends State<ChatScreenPage> {
         children: [
           // Messages List
           Expanded(
-            child: ListView.builder(
-              controller: _scrollController,
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
-              itemCount: _messages.length,
-              itemBuilder: (context, index) {
-                final message = _messages[index];
-                final showTimestamp = index == 0 ||
-                    _messages[index - 1]
-                            .timestamp
-                            .difference(message.timestamp)
-                            .inMinutes
-                            .abs() >
-                        30;
+            child: _isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : _messages.isEmpty
+                    ? Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.chat_bubble_outline, size: 64, color: Colors.grey.shade300),
+                            const SizedBox(height: 16),
+                            Text(
+                              'No messages yet',
+                              style: TextStyle(color: Colors.grey.shade600, fontSize: 16),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              'Start the conversation!',
+                              style: TextStyle(color: Colors.grey.shade400, fontSize: 14),
+                            ),
+                          ],
+                        ),
+                      )
+                    : ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+                        itemCount: _messages.length,
+                        itemBuilder: (context, index) {
+                          final message = _messages[index];
+                          final showTimestamp = index == 0 ||
+                              _messages[index - 1]
+                                      .timestamp
+                                      .difference(message.timestamp)
+                                      .inMinutes
+                                      .abs() >
+                                  30;
 
-                return Column(
-                  children: [
-                    if (showTimestamp) _buildTimestamp(message.timestamp),
-                    _buildMessageBubble(message),
-                  ],
-                );
-              },
-            ),
+                          return Column(
+                            children: [
+                              if (showTimestamp) _buildTimestamp(message.timestamp),
+                              _buildMessageBubble(message),
+                            ],
+                          );
+                        },
+                      ),
           ),
 
           // Message Input

@@ -72,4 +72,10 @@ abstract class DriverRidesRepository {
     required String rideId,
     required String otp,
   });
+
+  /// Start the trip (simplified, no OTP)
+  Future<Either<Failure, Ride>> startTrip({required String rideId});
+
+  /// Complete the trip
+  Future<Either<Failure, Ride>> completeTrip({required String rideId});
 }

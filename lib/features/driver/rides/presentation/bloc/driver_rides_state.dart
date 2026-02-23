@@ -242,3 +242,55 @@ class ActiveRideCancelled extends DriverRidesState {
   @override
   List<Object?> get props => [message];
 }
+
+/// Trip is in progress (driver has started the trip)
+class TripInProgress extends DriverRidesState {
+  final Ride ride;
+  final DriverOffer offer;
+  final double? driverLatitude;
+  final double? driverLongitude;
+  final String message;
+
+  const TripInProgress({
+    required this.ride,
+    required this.offer,
+    this.driverLatitude,
+    this.driverLongitude,
+    this.message = 'Trip is in progress',
+  });
+
+  @override
+  List<Object?> get props => [ride, offer, driverLatitude, driverLongitude, message];
+
+  TripInProgress copyWith({
+    Ride? ride,
+    DriverOffer? offer,
+    double? driverLatitude,
+    double? driverLongitude,
+  }) {
+    return TripInProgress(
+      ride: ride ?? this.ride,
+      offer: offer ?? this.offer,
+      driverLatitude: driverLatitude ?? this.driverLatitude,
+      driverLongitude: driverLongitude ?? this.driverLongitude,
+    );
+  }
+}
+
+/// Trip has been completed
+class TripCompleted extends DriverRidesState {
+  final Ride ride;
+  final DriverOffer offer;
+  final double earnings;
+  final String message;
+
+  const TripCompleted({
+    required this.ride,
+    required this.offer,
+    required this.earnings,
+    this.message = 'Trip completed successfully!',
+  });
+
+  @override
+  List<Object?> get props => [ride, offer, earnings, message];
+}

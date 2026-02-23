@@ -68,7 +68,9 @@ class RideModel extends Ride {
       estimatedFare: (json['estimated_fare'] as num).toDouble(),
       actualFare: json['actual_fare'] != null
           ? (json['actual_fare'] as num).toDouble()
-          : null,
+          : json['final_fare'] != null
+              ? (json['final_fare'] as num).toDouble()
+              : null,
       offeredPrice: json['offered_price'] != null
           ? (json['offered_price'] as num).toDouble()
           : null,
