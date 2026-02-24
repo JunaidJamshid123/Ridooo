@@ -299,213 +299,361 @@ class _DriverProfilePageState extends State<DriverProfilePage>
   Widget build(BuildContext context) {
     super.build(context); // Required for AutomaticKeepAliveClientMixin
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Account'),
-        centerTitle: true,
-        automaticallyImplyLeading: false,
-        actions: [
-          IconButton(
-            onPressed: _editProfile,
-            icon: const Icon(Icons.edit),
-          ),
-        ],
-      ),
+      backgroundColor: const Color(0xFFF8F9FA),
       body: _isLoading
           ? const Center(child: CircularProgressIndicator())
           : _currentDriver == null
               ? const Center(child: Text('No driver data'))
-              : SingleChildScrollView(
-                  child: Column(
-                    children: [
-                      const SizedBox(height: 24),
-                      // Profile photo with edit button
-                      Stack(
-                        children: [
-                          CircleAvatar(
-                            radius: 50,
-                            backgroundColor: Colors.blue.shade100,
-                            backgroundImage: _currentDriver!.profileImage != null
-                                ? NetworkImage(_currentDriver!.profileImage!)
-                                : null,
-                            child: _currentDriver!.profileImage == null
-                                ? Text(
-                                    _currentDriver!.name.substring(0, 1).toUpperCase(),
-                                    style: TextStyle(
-                                      fontSize: 32,
-                                      fontWeight: FontWeight.bold,
-                                      color: Colors.blue.shade700,
-                                    ),
-                                  )
-                                : null,
-                          ),
-                          Positioned(
-                            bottom: 0,
-                            right: 0,
-                            child: GestureDetector(
-                              onTap: _changeProfilePicture,
-                              child: Container(
-                                padding: const EdgeInsets.all(6),
-                                decoration: BoxDecoration(
-                                  color: Theme.of(context).primaryColor,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(color: Colors.white, width: 2),
-                                ),
-                                child: const Icon(
-                                  Icons.camera_alt,
-                                  size: 18,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
+              : CustomScrollView(
+                  slivers: [
+                    // Modern gradient header
+                    SliverToBoxAdapter(
+                      child: _buildProfileHeader(),
+                    ),
+                    // Vehicle info card
+                    if (_currentDriver!.vehicleModel != null ||
+                        _currentDriver!.vehiclePlate != null)
+                      SliverToBoxAdapter(
+                        child: _buildVehicleCard(),
                       ),
-                      const SizedBox(height: 16),
-                      // Name
-                      Text(
-                        _currentDriver!.name,
-                        style: const TextStyle(
-                          fontSize: 24,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      // Email
-                      Text(
-                        _currentDriver!.email,
-                        style: TextStyle(
-                          color: Colors.grey.shade600,
-                          fontSize: 14,
-                        ),
-                      ),
-                      if (_currentDriver!.phoneNumber != null) ...[
-                        const SizedBox(height: 4),
-                        Text(
-                          _currentDriver!.phoneNumber!,
-                          style: TextStyle(
-                            color: Colors.grey.shade600,
-                            fontSize: 14,
-                          ),
-                        ),
-                      ],
-                      const SizedBox(height: 24),
-                      // Driver-specific info card
-                      if (_currentDriver!.vehicleModel != null ||
-                          _currentDriver!.vehiclePlate != null) ...[
-                        Container(
-                          margin: const EdgeInsets.symmetric(horizontal: 16),
-                          padding: const EdgeInsets.all(16),
-                          decoration: BoxDecoration(
-                            color: Colors.blue.shade50,
-                            borderRadius: BorderRadius.circular(12),
-                            border: Border.all(color: Colors.blue.shade200),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                children: [
-                                  Icon(Icons.local_taxi, color: Colors.blue.shade700),
-                                  const SizedBox(width: 8),
-                                  const Text(
-                                    'Vehicle Information',
-                                    style: TextStyle(
-                                      fontSize: 16,
-                                      fontWeight: FontWeight.bold,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                              const SizedBox(height: 12),
-                              if (_currentDriver!.vehicleModel != null)
-                                _buildInfoRow('Model', _currentDriver!.vehicleModel!),
-                              if (_currentDriver!.vehiclePlate != null)
-                                _buildInfoRow('Plate', _currentDriver!.vehiclePlate!),
-                              if (_currentDriver!.licenseNumber != null)
-                                _buildInfoRow('License', _currentDriver!.licenseNumber!),
-                            ],
-                          ),
-                        ),
-                        const SizedBox(height: 24),
-                      ],
-                      // Menu items
-                      _buildMenuItem(
-                        icon: Icons.person_outline,
-                        title: 'Edit Profile',
-                        onTap: _editProfile,
-                      ),
-                      const Divider(),
-                      _buildMenuItem(
-                        icon: Icons.history,
-                        title: 'Trip History',
-                        onTap: () {},
-                      ),
-                      const Divider(),
-                      _buildMenuItem(
-                        icon: Icons.directions_car,
-                        title: 'Vehicle Details',
-                        onTap: () {},
-                      ),
-                      const Divider(),
-                      _buildMenuItem(
-                        icon: Icons.description,
-                        title: 'Documents',
-                        onTap: () {},
-                      ),
-                      const Divider(),
-                      _buildMenuItem(
-                        icon: Icons.account_balance_wallet,
-                        title: 'Earnings & Payouts',
-                        onTap: () {},
-                      ),
-                      const Divider(),
-                      _buildMenuItem(
-                        icon: Icons.settings_outlined,
-                        title: 'Settings',
-                        onTap: () {},
-                      ),
-                      const Divider(),
-                      _buildMenuItem(
-                        icon: Icons.help_outline,
-                        title: 'Help & Support',
-                        onTap: () {},
-                      ),
-                      const Divider(),
-                      _buildMenuItem(
-                        icon: Icons.logout,
-                        title: 'Logout',
-                        onTap: _logout,
-                        textColor: Colors.red,
-                      ),
-                      const SizedBox(height: 24),
-                    ],
-                  ),
+                    // Stats row
+                    SliverToBoxAdapter(
+                      child: _buildStatsRow(),
+                    ),
+                    // Menu sections
+                    SliverToBoxAdapter(
+                      child: _buildMenuSections(),
+                    ),
+                  ],
                 ),
     );
   }
 
-  Widget _buildInfoRow(String label, String value) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
+  Widget _buildProfileHeader() {
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xFF1A1A1A),
+            Color(0xFF2D2D2D),
+            Color(0xFF3D3D3D),
+          ],
+        ),
+      ),
+      child: SafeArea(
+        bottom: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+          child: Column(
+            children: [
+              // Top row with title and edit button
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    'Driver Profile',
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      letterSpacing: -0.5,
+                    ),
+                  ),
+                  Container(
+                    decoration: BoxDecoration(
+                      color: Colors.white.withOpacity(0.15),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: IconButton(
+                      onPressed: _editProfile,
+                      icon: const Icon(Icons.edit_rounded, color: Colors.white, size: 20),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              // Profile photo and info
+              Row(
+                children: [
+                  // Profile photo with camera button
+                  Stack(
+                    children: [
+                      Container(
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white.withOpacity(0.3), width: 3),
+                          boxShadow: [
+                            BoxShadow(
+                              color: Colors.black.withOpacity(0.3),
+                              blurRadius: 20,
+                              offset: const Offset(0, 8),
+                            ),
+                          ],
+                        ),
+                        child: CircleAvatar(
+                          radius: 45,
+                          backgroundColor: const Color(0xFF4A4A4A),
+                          backgroundImage: _currentDriver!.profileImage != null
+                              ? NetworkImage(_currentDriver!.profileImage!)
+                              : null,
+                          child: _currentDriver!.profileImage == null
+                              ? Text(
+                                  _currentDriver!.name.substring(0, 1).toUpperCase(),
+                                  style: const TextStyle(
+                                    fontSize: 32,
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.white,
+                                  ),
+                                )
+                              : null,
+                        ),
+                      ),
+                      Positioned(
+                        bottom: 0,
+                        right: 0,
+                        child: GestureDetector(
+                          onTap: _changeProfilePicture,
+                          child: Container(
+                            padding: const EdgeInsets.all(8),
+                            decoration: BoxDecoration(
+                              gradient: const LinearGradient(
+                                colors: [Color(0xFF2ED573), Color(0xFF7BED9F)],
+                              ),
+                              shape: BoxShape.circle,
+                              border: Border.all(color: Colors.white, width: 2),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: const Color(0xFF2ED573).withOpacity(0.4),
+                                  blurRadius: 8,
+                                  offset: const Offset(0, 2),
+                                ),
+                              ],
+                            ),
+                            child: const Icon(
+                              Icons.camera_alt_rounded,
+                              size: 16,
+                              color: Colors.white,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(width: 20),
+                  // Name and contact info
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          _currentDriver!.name,
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 22,
+                            fontWeight: FontWeight.w800,
+                            letterSpacing: -0.5,
+                          ),
+                        ),
+                        const SizedBox(height: 4),
+                        // Driver badge
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFFFFA726), Color(0xFFFF7043)],
+                            ),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: const Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(Icons.verified_rounded, color: Colors.white, size: 14),
+                              SizedBox(width: 4),
+                              Text(
+                                'Verified Driver',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 11,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                        // Contact pills
+                        Wrap(
+                          spacing: 8,
+                          runSpacing: 6,
+                          children: [
+                            _buildContactPill(
+                              Icons.email_rounded,
+                              _currentDriver!.email,
+                            ),
+                            if (_currentDriver!.phoneNumber != null)
+                              _buildContactPill(
+                                Icons.phone_rounded,
+                                _currentDriver!.phoneNumber!,
+                              ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildContactPill(IconData icon, String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withOpacity(0.15)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: Colors.white70, size: 14),
+          const SizedBox(width: 6),
+          Text(
+            text,
+            style: const TextStyle(
+              color: Colors.white70,
+              fontSize: 12,
+              fontWeight: FontWeight.w500,
+            ),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVehicleCard() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      transform: Matrix4.translationValues(0, -20, 0),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.08),
+            blurRadius: 20,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF667EEA), Color(0xFF764BA2)],
+                  ),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: const Icon(Icons.directions_car_rounded, color: Colors.white, size: 22),
+              ),
+              const SizedBox(width: 14),
+              const Text(
+                'Vehicle Information',
+                style: TextStyle(
+                  fontSize: 17,
+                  fontWeight: FontWeight.w700,
+                  letterSpacing: -0.3,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 20),
+          Row(
+            children: [
+              if (_currentDriver!.vehicleModel != null)
+                Expanded(
+                  child: _buildVehicleInfoItem(
+                    Icons.time_to_leave_rounded,
+                    'Model',
+                    _currentDriver!.vehicleModel!,
+                    const Color(0xFF3498DB),
+                  ),
+                ),
+              if (_currentDriver!.vehiclePlate != null)
+                Expanded(
+                  child: _buildVehicleInfoItem(
+                    Icons.confirmation_number_rounded,
+                    'Plate',
+                    _currentDriver!.vehiclePlate!,
+                    const Color(0xFF2ECC71),
+                  ),
+                ),
+            ],
+          ),
+          if (_currentDriver!.licenseNumber != null) ...[
+            const SizedBox(height: 12),
+            _buildVehicleInfoItem(
+              Icons.badge_rounded,
+              'License Number',
+              _currentDriver!.licenseNumber!,
+              const Color(0xFFF39C12),
+              fullWidth: true,
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _buildVehicleInfoItem(IconData icon, String label, String value, Color color, {bool fullWidth = false}) {
+    return Container(
+      padding: const EdgeInsets.all(14),
+      margin: EdgeInsets.only(right: fullWidth ? 0 : 6),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.08),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: color.withOpacity(0.2)),
+      ),
       child: Row(
         children: [
-          SizedBox(
-            width: 70,
-            child: Text(
-              label,
-              style: TextStyle(
-                color: Colors.grey.shade600,
-                fontSize: 14,
-              ),
-            ),
-          ),
+          Icon(icon, color: color, size: 20),
+          const SizedBox(width: 10),
           Expanded(
-            child: Text(
-              value,
-              style: const TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-              ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  style: TextStyle(
+                    color: Colors.grey.shade500,
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  value,
+                  style: const TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.3,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
             ),
           ),
         ],
@@ -513,20 +661,244 @@ class _DriverProfilePageState extends State<DriverProfilePage>
     );
   }
 
-  Widget _buildMenuItem({
+  Widget _buildStatsRow() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 20),
+      child: Row(
+        children: [
+          _buildStatCard('4.8', 'Rating', Icons.star_rounded, const Color(0xFFFFA726)),
+          const SizedBox(width: 12),
+          _buildStatCard('248', 'Trips', Icons.route_rounded, const Color(0xFF42A5F5)),
+          const SizedBox(width: 12),
+          _buildStatCard('2y', 'Experience', Icons.access_time_rounded, const Color(0xFF66BB6A)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatCard(String value, String label, IconData icon, Color color) {
+    return Expanded(
+      child: Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 10,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: Column(
+          children: [
+            Icon(icon, color: color, size: 24),
+            const SizedBox(height: 8),
+            Text(
+              value,
+              style: const TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w800,
+                letterSpacing: -0.5,
+              ),
+            ),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                color: Colors.grey.shade500,
+                fontWeight: FontWeight.w500,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMenuSections() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Account section
+          _buildSectionHeader('Account'),
+          const SizedBox(height: 10),
+          _buildMenuCard([
+            _buildModernMenuItem(
+              icon: Icons.person_rounded,
+              title: 'Edit Profile',
+              subtitle: 'Update your personal info',
+              color: const Color(0xFF667EEA),
+              onTap: _editProfile,
+            ),
+            _buildModernMenuItem(
+              icon: Icons.history_rounded,
+              title: 'Trip History',
+              subtitle: 'View past rides',
+              color: const Color(0xFF42A5F5),
+              onTap: () {},
+            ),
+            _buildModernMenuItem(
+              icon: Icons.directions_car_rounded,
+              title: 'Vehicle Details',
+              subtitle: 'Manage vehicle info',
+              color: const Color(0xFF9CCC65),
+              onTap: () {},
+              isLast: true,
+            ),
+          ]),
+          const SizedBox(height: 20),
+          // Documents section
+          _buildSectionHeader('Documents & Earnings'),
+          const SizedBox(height: 10),
+          _buildMenuCard([
+            _buildModernMenuItem(
+              icon: Icons.description_rounded,
+              title: 'Documents',
+              subtitle: 'License, insurance & more',
+              color: const Color(0xFFFF7043),
+              onTap: () {},
+            ),
+            _buildModernMenuItem(
+              icon: Icons.account_balance_wallet_rounded,
+              title: 'Earnings & Payouts',
+              subtitle: 'View your earnings',
+              color: const Color(0xFF26A69A),
+              onTap: () {},
+              isLast: true,
+            ),
+          ]),
+          const SizedBox(height: 20),
+          // Support section
+          _buildSectionHeader('Support'),
+          const SizedBox(height: 10),
+          _buildMenuCard([
+            _buildModernMenuItem(
+              icon: Icons.settings_rounded,
+              title: 'Settings',
+              subtitle: 'App preferences',
+              color: const Color(0xFF78909C),
+              onTap: () {},
+            ),
+            _buildModernMenuItem(
+              icon: Icons.help_rounded,
+              title: 'Help & Support',
+              subtitle: 'Get assistance',
+              color: const Color(0xFF5C6BC0),
+              onTap: () {},
+            ),
+            _buildModernMenuItem(
+              icon: Icons.logout_rounded,
+              title: 'Logout',
+              subtitle: 'Sign out of your account',
+              color: const Color(0xFFEF5350),
+              onTap: _logout,
+              isLast: true,
+            ),
+          ]),
+          const SizedBox(height: 32),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionHeader(String title) {
+    return Text(
+      title,
+      style: const TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w700,
+        color: Color(0xFF9E9E9E),
+        letterSpacing: 0.5,
+      ),
+    );
+  }
+
+  Widget _buildMenuCard(List<Widget> children) {
+    return Container(
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.04),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(children: children),
+    );
+  }
+
+  Widget _buildModernMenuItem({
     required IconData icon,
     required String title,
+    required String subtitle,
+    required Color color,
     required VoidCallback onTap,
-    Color? textColor,
+    bool isLast = false,
   }) {
-    return ListTile(
-      leading: Icon(icon, color: textColor),
-      title: Text(
-        title,
-        style: TextStyle(color: textColor),
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.vertical(
+          top: Radius.circular(isLast ? 0 : 16),
+          bottom: Radius.circular(isLast ? 16 : 0),
+        ),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          decoration: BoxDecoration(
+            border: isLast
+                ? null
+                : Border(
+                    bottom: BorderSide(color: Colors.grey.shade100, width: 1),
+                  ),
+          ),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: color.withOpacity(0.1),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, color: color, size: 22),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: -0.2,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      subtitle,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey.shade500,
+                        fontWeight: FontWeight.w400,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              Icon(Icons.chevron_right_rounded, color: Colors.grey.shade400, size: 22),
+            ],
+          ),
+        ),
       ),
-      trailing: const Icon(Icons.arrow_forward_ios, size: 16),
-      onTap: onTap,
     );
   }
 }

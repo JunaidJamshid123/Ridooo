@@ -25,30 +25,88 @@ class ChatScreenPage extends StatefulWidget {
   State<ChatScreenPage> createState() => _ChatScreenPageState();
 }
 
-class _ChatScreenPageState extends State<ChatScreenPage> {
+class _ChatScreenPageState extends State<ChatScreenPage> with WidgetsBindingObserver {
   final TextEditingController _messageController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final SupabaseClient _supabase = Supabase.instance.client;
   
   List<ChatMessage> _messages = [];
   bool _isLoading = true;
-  StreamSubscription? _messageSubscription;
+  RealtimeChannel? _channel;
+  Timer? _pollingTimer;  // Fallback polling for message sync
   String? _currentUserId;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _currentUserId = _supabase.auth.currentUser?.id;
     _loadMessages();
     _subscribeToMessages();
+    _startPolling();  // Start fallback polling
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _messageController.dispose();
     _scrollController.dispose();
-    _messageSubscription?.cancel();
+    _channel?.unsubscribe();
+    _pollingTimer?.cancel();
     super.dispose();
+  }
+  
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Refresh messages when app comes to foreground
+      _loadMessages();
+    }
+  }
+  
+  /// Start periodic polling as fallback for realtime
+  void _startPolling() {
+    _pollingTimer?.cancel();
+    _pollingTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      _pollNewMessages();
+    });
+  }
+  
+  /// Poll for new messages (fallback mechanism)
+  Future<void> _pollNewMessages() async {
+    if (_currentUserId == null || !mounted) return;
+    
+    try {
+      var query = _supabase
+          .from('chat_messages')
+          .select()
+          .or('and(sender_id.eq.$_currentUserId,receiver_id.eq.${widget.recipientId}),and(sender_id.eq.${widget.recipientId},receiver_id.eq.$_currentUserId)');
+      
+      if (widget.rideId != null) {
+        query = query.eq('ride_id', widget.rideId!);
+      }
+      
+      final response = await query
+          .order('created_at', ascending: true)
+          .limit(100);
+      
+      final newMessages = (response as List).map((json) => ChatMessage(
+        id: json['id'] as String,
+        text: json['content'] as String,
+        isFromUser: json['sender_id'] == _currentUserId,
+        timestamp: DateTime.parse(json['created_at'] as String),
+      )).toList();
+      
+      // Only update if there are new messages
+      if (newMessages.length != _messages.length) {
+        setState(() {
+          _messages = newMessages;
+        });
+        _scrollToBottom();
+      }
+    } catch (e) {
+      debugPrint('Error polling messages: $e');
+    }
   }
   
   Future<void> _loadMessages() async {
@@ -81,71 +139,87 @@ class _ChatScreenPageState extends State<ChatScreenPage> {
       });
       
       _scrollToBottom();
+      
+      // Mark messages as read
+      _markMessagesAsRead();
     } catch (e) {
       debugPrint('Error loading messages: $e');
       setState(() => _isLoading = false);
     }
   }
   
+  Future<void> _markMessagesAsRead() async {
+    if (_currentUserId == null || widget.rideId == null) return;
+    
+    try {
+      await _supabase
+          .from('chat_messages')
+          .update({'is_read': true})
+          .eq('ride_id', widget.rideId!)
+          .eq('receiver_id', _currentUserId!)
+          .eq('is_read', false);
+    } catch (e) {
+      debugPrint('Error marking messages as read: $e');
+    }
+  }
+  
   void _subscribeToMessages() {
     if (_currentUserId == null) return;
     
-    // Subscribe to new messages
-    _supabase
-        .channel('chat_${_currentUserId}_${widget.recipientId}')
-        .onPostgresChanges(
-          event: PostgresChangeEvent.insert,
-          schema: 'public',
-          table: 'chat_messages',
-          callback: (payload) {
-            final newMessage = payload.newRecord;
-            // Check if this message is for this conversation
-            final senderId = newMessage['sender_id'];
-            final receiverId = newMessage['receiver_id'];
-            final messageId = newMessage['id'] as String;
-            
-            if ((senderId == _currentUserId && receiverId == widget.recipientId) ||
-                (senderId == widget.recipientId && receiverId == _currentUserId)) {
-              // Check for ride_id filter
-              if (widget.rideId != null && newMessage['ride_id'] != widget.rideId) {
-                return;
-              }
-              
-              // Avoid duplicates - check if message already exists (from optimistic update)
-              final existingIndex = _messages.indexWhere((m) => 
-                  m.id == messageId || 
-                  (m.text == newMessage['content'] as String && 
-                   m.isFromUser && 
-                   senderId == _currentUserId &&
-                   m.timestamp.difference(DateTime.parse(newMessage['created_at'] as String)).inSeconds.abs() < 5)
-              );
-              
-              if (existingIndex == -1) {
-                // New message from recipient
-                setState(() {
-                  _messages.add(ChatMessage(
-                    id: messageId,
-                    text: newMessage['content'] as String,
-                    isFromUser: newMessage['sender_id'] == _currentUserId,
-                    timestamp: DateTime.parse(newMessage['created_at'] as String),
-                  ));
-                });
-                _scrollToBottom();
-              } else if (_messages[existingIndex].id != messageId) {
-                // Update the optimistic message with the real ID
-                setState(() {
-                  _messages[existingIndex] = ChatMessage(
-                    id: messageId,
-                    text: newMessage['content'] as String,
-                    isFromUser: newMessage['sender_id'] == _currentUserId,
-                    timestamp: DateTime.parse(newMessage['created_at'] as String),
-                  );
-                });
-              }
-            }
-          },
-        )
-        .subscribe();
+    // Create a unique channel name for this conversation
+    final channelName = widget.rideId != null 
+        ? 'chat_ride_${widget.rideId}'
+        : 'chat_${_currentUserId}_${widget.recipientId}';
+    
+    _channel = _supabase.channel(channelName);
+    
+    _channel!.onPostgresChanges(
+      event: PostgresChangeEvent.insert,
+      schema: 'public',
+      table: 'chat_messages',
+      callback: (payload) {
+        final newMessage = payload.newRecord;
+        if (newMessage.isEmpty) return;
+        
+        // Check if this message is for this conversation
+        final senderId = newMessage['sender_id'];
+        final receiverId = newMessage['receiver_id'];
+        final messageId = newMessage['id'] as String;
+        final messageRideId = newMessage['ride_id'];
+        
+        // Skip if ride_id doesn't match (when filtered by ride)
+        if (widget.rideId != null && messageRideId != widget.rideId) {
+          return;
+        }
+        
+        // Check if message belongs to this conversation
+        if (!((senderId == _currentUserId && receiverId == widget.recipientId) ||
+              (senderId == widget.recipientId && receiverId == _currentUserId))) {
+          return;
+        }
+        
+        // Check if message already exists
+        final existingIndex = _messages.indexWhere((m) => m.id == messageId);
+        
+        if (existingIndex == -1) {
+          // New message from other user
+          setState(() {
+            _messages.add(ChatMessage(
+              id: messageId,
+              text: newMessage['content'] as String? ?? '',
+              isFromUser: senderId == _currentUserId,
+              timestamp: DateTime.parse(newMessage['created_at'] as String),
+            ));
+          });
+          _scrollToBottom();
+          
+          // Mark as read if from other user
+          if (senderId != _currentUserId) {
+            _markMessagesAsRead();
+          }
+        }
+      },
+    ).subscribe();
   }
   
   void _scrollToBottom() {

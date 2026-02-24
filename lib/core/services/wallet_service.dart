@@ -98,6 +98,7 @@ class WalletService {
     }
   }
 
+
   /// Deduct money from wallet (for ride payment)
   Future<Map<String, dynamic>> deductMoney({
     required String userId,

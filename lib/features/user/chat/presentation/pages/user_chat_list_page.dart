@@ -43,53 +43,61 @@ class _UserChatListPageState extends State<UserChatListPage>
         return;
       }
 
-      // Optimized: Single query with JOIN to get rides with accepted offers and driver info
-      final ridesResponse = await _supabase
-          .from('rides')
+      // Best approach: Get accepted driver_offers with ride info (driver_name is denormalized in offers)
+      final offersResponse = await _supabase
+          .from('driver_offers')
           .select('''
-            id, 
-            driver_id, 
-            status, 
-            pickup_address, 
-            dropoff_address, 
+            ride_id, 
+            driver_id,
+            driver_name,
+            driver_photo,
             created_at,
-            driver:driver_id(name, profile_image)
+            ride:ride_id(
+              id, 
+              user_id, 
+              status, 
+              pickup_address, 
+              dropoff_address, 
+              created_at
+            )
           ''')
-          .eq('user_id', userId)
-          .inFilter('status', ['accepted', 'arrived', 'in_progress', 'completed'])
+          .eq('status', 'accepted')
           .order('created_at', ascending: false)
           .limit(50);
 
       final Map<String, ChatConversation> conversationsMap = {};
       final List<String> rideIds = [];
-      final Map<String, String> rideDriverIds = {};
       
-      for (final ride in ridesResponse as List) {
-        final rideId = ride['id'] as String;
-        final driverId = ride['driver_id'] as String?;
+      // First pass: collect data from the join query
+      for (final offer in offersResponse as List) {
+        final rideData = offer['ride'];
+        if (rideData == null) continue;
         
-        if (driverId == null) continue;
+        // Check if this ride belongs to current user
+        final rideUserId = rideData['user_id'] as String?;
+        if (rideUserId != userId) continue;
+        
+        final rideId = rideData['id'] as String;
         
         // Skip if already processed
         if (conversationsMap.containsKey(rideId)) continue;
         
-        // Get driver info from joined data
-        final driverData = ride['driver'];
-        String driverName = '';
-        String? driverPhoto;
+        // Only show active/recent rides
+        final rideStatus = rideData['status'] as String;
+        if (!['accepted', 'arrived', 'in_progress', 'completed'].contains(rideStatus)) continue;
         
-        if (driverData != null && driverData is Map) {
-          driverName = driverData['name'] as String? ?? '';
-          driverPhoto = driverData['profile_image'] as String?;
-        }
+        final driverId = offer['driver_id'] as String;
         
-        // Fallback: try to get from driver_offers if user data is empty
+        // Get driver info from offer (denormalized)
+        String driverName = offer['driver_name'] as String? ?? '';
+        String? driverPhoto = offer['driver_photo'] as String?;
+        
+        // If name still empty, use a friendly fallback
         if (driverName.isEmpty) {
           driverName = 'Driver';
         }
         
         rideIds.add(rideId);
-        rideDriverIds[rideId] = driverId;
         
         conversationsMap[rideId] = ChatConversation(
           id: rideId,
@@ -98,45 +106,10 @@ class _UserChatListPageState extends State<UserChatListPage>
           driverName: driverName,
           driverImage: driverPhoto,
           lastMessage: 'Start a conversation',
-          timestamp: DateTime.parse(ride['created_at'] as String),
+          timestamp: DateTime.parse(rideData['created_at'] as String),
           unreadCount: 0,
           isOnline: true,
         );
-      }
-      
-      // For empty names, try to get from driver_offers in batch
-      final emptyNameRideIds = conversationsMap.entries
-          .where((e) => e.value.driverName == 'Driver')
-          .map((e) => e.key)
-          .toList();
-      
-      if (emptyNameRideIds.isNotEmpty) {
-        final offersResponse = await _supabase
-            .from('driver_offers')
-            .select('ride_id, driver_name, driver_photo')
-            .inFilter('ride_id', emptyNameRideIds)
-            .eq('status', 'accepted');
-        
-        for (final offer in offersResponse as List) {
-          final rideId = offer['ride_id'] as String;
-          final offerDriverName = offer['driver_name'] as String? ?? '';
-          final offerDriverPhoto = offer['driver_photo'] as String?;
-          
-          if (offerDriverName.isNotEmpty && offerDriverName != 'Driver' && conversationsMap.containsKey(rideId)) {
-            final existing = conversationsMap[rideId]!;
-            conversationsMap[rideId] = ChatConversation(
-              id: existing.id,
-              driverId: existing.driverId,
-              rideId: existing.rideId,
-              driverName: offerDriverName,
-              driverImage: offerDriverPhoto ?? existing.driverImage,
-              lastMessage: existing.lastMessage,
-              timestamp: existing.timestamp,
-              unreadCount: existing.unreadCount,
-              isOnline: existing.isOnline,
-            );
-          }
-        }
       }
       
       // Batch fetch: Get all messages for these rides at once

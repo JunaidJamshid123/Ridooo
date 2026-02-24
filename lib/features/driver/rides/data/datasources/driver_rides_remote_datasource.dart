@@ -94,21 +94,44 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
     required int radiusKm,
   }) async {
     try {
-      // Get rides that are in 'searching' status and nearby
-      // Join with users table to get user info
+      // Get rides that are in 'searching' status
       final response = await supabase
           .from(ApiConstants.ridesTable)
-          .select('*, user:user_id(name, phone_number, profile_image)')
+          .select()
           .eq('status', 'searching')
           .order('created_at', ascending: false)
           .limit(20);
 
-      if (response == null) {
-        return [];
+      // Get unique user IDs and fetch user info in batch
+      final ridesList = (response as List).cast<Map<String, dynamic>>();
+      final userIds = ridesList
+          .map((r) => r['user_id'] as String)
+          .toSet()
+          .toList();
+      
+      Map<String, Map<String, dynamic>> usersMap = {};
+      if (userIds.isNotEmpty) {
+        final usersResponse = await supabase
+            .from('users')
+            .select('id, name, phone_number, profile_image')
+            .inFilter('id', userIds);
+        
+        for (final user in (usersResponse as List).cast<Map<String, dynamic>>()) {
+          usersMap[user['id'] as String] = user;
+        }
       }
+      
+      // Merge user data into rides
+      final ridesWithUsers = ridesList.map((ride) {
+        final userId = ride['user_id'] as String;
+        final userData = usersMap[userId];
+        return <String, dynamic>{
+          ...ride,
+          'user': userData,
+        };
+      }).toList();
 
-      final rides =
-          (response as List).map((json) => RideModel.fromJson(json)).toList();
+      final rides = ridesWithUsers.map((json) => RideModel.fromJson(json)).toList();
 
       // Filter by distance (simple approach - could use PostGIS functions for better performance)
       final nearbyRides =
@@ -331,7 +354,7 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
       final response =
           await supabase
               .from(ApiConstants.ridesTable)
-              .select('*, user:user_id(name, phone_number, profile_image)')
+              .select()
               .eq('driver_id', driverId)
               .inFilter('status', ['accepted', 'arrived', 'in_progress'])
               .order('created_at', ascending: false)
@@ -340,7 +363,20 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
 
       if (response == null) return null;
 
-      return RideModel.fromJson(response);
+      // Fetch user info separately
+      final userId = response['user_id'] as String;
+      final userResponse = await supabase
+          .from('users')
+          .select('id, name, phone_number, profile_image')
+          .eq('id', userId)
+          .maybeSingle();
+      
+      final rideWithUser = {
+        ...response,
+        'user': userResponse,
+      };
+
+      return RideModel.fromJson(rideWithUser);
     } catch (e) {
       throw ServerException('Failed to get active ride: $e');
     }
@@ -352,11 +388,24 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
       final response =
           await supabase
               .from(ApiConstants.ridesTable)
-              .select('*, user:user_id(name, phone_number, profile_image)')
+              .select()
               .eq('id', rideId)
               .single();
 
-      return RideModel.fromJson(response);
+      // Fetch user info separately
+      final userId = response['user_id'] as String;
+      final userResponse = await supabase
+          .from('users')
+          .select('id, name, phone_number, profile_image')
+          .eq('id', userId)
+          .maybeSingle();
+      
+      final rideWithUser = {
+        ...response,
+        'user': userResponse,
+      };
+
+      return RideModel.fromJson(rideWithUser);
     } catch (e) {
       throw ServerException('Failed to get ride: $e');
     }
@@ -389,10 +438,23 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
                 'started_at': DateTime.now().toIso8601String(),
               })
               .eq('id', rideId)
-              .select('*, user:user_id(name, phone_number, profile_image)')
+              .select()
               .single();
 
-      return RideModel.fromJson(response);
+      // Fetch user info separately
+      final userId = response['user_id'] as String;
+      final userResponse = await supabase
+          .from('users')
+          .select('id, name, phone_number, profile_image')
+          .eq('id', userId)
+          .maybeSingle();
+      
+      final rideWithUser = {
+        ...response,
+        'user': userResponse,
+      };
+
+      return RideModel.fromJson(rideWithUser);
     } catch (e) {
       if (e is ServerException) rethrow;
       throw ServerException('Failed to start trip: $e');
@@ -411,10 +473,23 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
                 'started_at': DateTime.now().toIso8601String(),
               })
               .eq('id', rideId)
-              .select('*, user:user_id(name, phone_number, profile_image)')
+              .select()
               .single();
 
-      return RideModel.fromJson(response);
+      // Fetch user info separately
+      final userId = response['user_id'] as String;
+      final userResponse = await supabase
+          .from('users')
+          .select('id, name, phone_number, profile_image')
+          .eq('id', userId)
+          .maybeSingle();
+      
+      final rideWithUser = {
+        ...response,
+        'user': userResponse,
+      };
+
+      return RideModel.fromJson(rideWithUser);
     } catch (e) {
       throw ServerException('Failed to start trip: $e');
     }
@@ -449,10 +524,23 @@ class DriverRidesRemoteDataSourceImpl implements DriverRidesRemoteDataSource {
               .from(ApiConstants.ridesTable)
               .update(updateData)
               .eq('id', rideId)
-              .select('*, user:user_id(name, phone_number, profile_image)')
+              .select()
               .single();
 
-      return RideModel.fromJson(response);
+      // Fetch user info separately
+      final userId = response['user_id'] as String;
+      final userResponse = await supabase
+          .from('users')
+          .select('id, name, phone_number, profile_image')
+          .eq('id', userId)
+          .maybeSingle();
+      
+      final rideWithUser = {
+        ...response,
+        'user': userResponse,
+      };
+
+      return RideModel.fromJson(rideWithUser);
     } catch (e) {
       throw ServerException('Failed to complete trip: $e');
     }

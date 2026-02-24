@@ -43,7 +43,7 @@ class _DriverChatListPageState extends State<DriverChatListPage>
         return;
       }
 
-      // Optimized: Single query with JOIN to get accepted offers with ride and user info
+      // Optimized: Single query with JOIN to get accepted offers with ride info
       final offersResponse = await _supabase
           .from('driver_offers')
           .select('''
@@ -55,8 +55,7 @@ class _DriverChatListPageState extends State<DriverChatListPage>
               status, 
               pickup_address, 
               dropoff_address, 
-              created_at,
-              user:user_id(name, phone_number, profile_image)
+              created_at
             )
           ''')
           .eq('driver_id', driverId)
@@ -66,8 +65,10 @@ class _DriverChatListPageState extends State<DriverChatListPage>
 
       final Map<String, ChatConversation> conversationsMap = {};
       final List<String> rideIds = [];
+      final List<String> userIds = [];
+      final Map<String, String> rideToUserMap = {};
       
-      // First pass: collect data from the join query
+      // First pass: collect ride and user IDs
       for (final offer in offersResponse as List) {
         final rideData = offer['ride'];
         if (rideData == null) continue;
@@ -82,35 +83,62 @@ class _DriverChatListPageState extends State<DriverChatListPage>
         if (!['accepted', 'arrived', 'in_progress', 'completed'].contains(rideStatus)) continue;
         
         final passengerId = rideData['user_id'] as String;
-        final userData = rideData['user'];
-        
-        // Get user info from joined data
-        String passengerName = '';
-        String? passengerImage;
-        
-        if (userData != null && userData is Map) {
-          passengerName = userData['name'] as String? ?? '';
-          passengerImage = userData['profile_image'] as String?;
-        }
-        
-        // If name still empty, use a friendly fallback
-        if (passengerName.isEmpty) {
-          passengerName = 'Passenger';
-        }
         
         rideIds.add(rideId);
+        if (!userIds.contains(passengerId)) {
+          userIds.add(passengerId);
+        }
+        rideToUserMap[rideId] = passengerId;
         
         conversationsMap[rideId] = ChatConversation(
           id: rideId,
           passengerId: passengerId,
           rideId: rideId,
-          passengerName: passengerName,
-          passengerImage: passengerImage,
+          passengerName: 'Passenger', // Will be updated below
+          passengerImage: null,
           lastMessage: 'Start a conversation',
           timestamp: DateTime.parse(rideData['created_at'] as String),
           unreadCount: 0,
           isOnline: true,
         );
+      }
+      
+      // Batch fetch user info for all passengers
+      if (userIds.isNotEmpty) {
+        final usersResponse = await _supabase
+            .from('users')
+            .select('id, name, profile_image')
+            .inFilter('id', userIds);
+        
+        final Map<String, Map<String, dynamic>> usersMap = {};
+        for (final user in usersResponse as List) {
+          usersMap[user['id'] as String] = user;
+        }
+        
+        // Update conversations with user info
+        for (final rideId in conversationsMap.keys) {
+          final passengerId = rideToUserMap[rideId];
+          if (passengerId == null) continue;
+          
+          final userData = usersMap[passengerId];
+          if (userData != null) {
+            final name = userData['name'] as String? ?? 'Passenger';
+            final photo = userData['profile_image'] as String?;
+            
+            final existing = conversationsMap[rideId]!;
+            conversationsMap[rideId] = ChatConversation(
+              id: existing.id,
+              passengerId: existing.passengerId,
+              rideId: existing.rideId,
+              passengerName: name.isNotEmpty ? name : 'Passenger',
+              passengerImage: photo,
+              lastMessage: existing.lastMessage,
+              timestamp: existing.timestamp,
+              unreadCount: existing.unreadCount,
+              isOnline: existing.isOnline,
+            );
+          }
+        }
       }
       
       // Batch fetch: Get last messages and unread counts for all rides at once

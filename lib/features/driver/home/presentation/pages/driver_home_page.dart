@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -20,12 +21,18 @@ class DriverHomePage extends StatefulWidget {
   State<DriverHomePage> createState() => _DriverHomePageState();
 }
 
-class _DriverHomePageState extends State<DriverHomePage> {
+class _DriverHomePageState extends State<DriverHomePage> with TickerProviderStateMixin {
   GoogleMapController? _mapController;
   bool _isOnline = false;
   Position? _currentPosition;
   final Set<Marker> _markers = {};
   Timer? _locationTimer;
+  
+  // Animation controllers
+  late AnimationController _pulseController;
+  late Animation<double> _pulseAnimation;
+  late AnimationController _statusController;
+  late Animation<double> _statusAnimation;
   
   // Real ride requests from BLoC
   List<Ride> _nearbyRides = [];
@@ -62,6 +69,24 @@ class _DriverHomePageState extends State<DriverHomePage> {
   @override
   void initState() {
     super.initState();
+    
+    // Initialize animation controllers
+    _pulseController = AnimationController(
+      duration: const Duration(seconds: 2),
+      vsync: this,
+    );
+    _pulseAnimation = Tween<double>(begin: 1.0, end: 1.3).animate(
+      CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+    );
+    
+    _statusController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+    _statusAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _statusController, curve: Curves.easeOut),
+    );
+    
     _getCurrentLocation();
     _initializeBloc();
   }
@@ -95,6 +120,8 @@ class _DriverHomePageState extends State<DriverHomePage> {
   void dispose() {
     _locationTimer?.cancel();
     _mapController?.dispose();
+    _pulseController.dispose();
+    _statusController.dispose();
     super.dispose();
   }
 
@@ -208,6 +235,16 @@ class _DriverHomePageState extends State<DriverHomePage> {
     setState(() {
       _isOnline = !_isOnline;
     });
+    
+    // Animate status change
+    if (_isOnline) {
+      _pulseController.repeat(reverse: true);
+      _statusController.forward();
+    } else {
+      _pulseController.stop();
+      _pulseController.reset();
+      _statusController.reverse();
+    }
 
     // Update BLoC status
     try {
@@ -761,52 +798,105 @@ class _DriverHomePageState extends State<DriverHomePage> {
                     ),
                     child: Row(
                       children: [
-                        Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                            color: _isOnline ? AppColors.success : Colors.grey,
-                            shape: BoxShape.circle,
-                          ),
+                        // Animated status indicator
+                        AnimatedBuilder(
+                          animation: _pulseAnimation,
+                          builder: (context, child) {
+                            return Container(
+                              width: _isOnline ? 12 * _pulseAnimation.value : 10,
+                              height: _isOnline ? 12 * _pulseAnimation.value : 10,
+                              decoration: BoxDecoration(
+                                color: _isOnline ? AppColors.success : Colors.grey.shade400,
+                                shape: BoxShape.circle,
+                                boxShadow: _isOnline ? [
+                                  BoxShadow(
+                                    color: AppColors.success.withOpacity(0.4),
+                                    blurRadius: 8,
+                                    spreadRadius: 2,
+                                  ),
+                                ] : null,
+                              ),
+                            );
+                          },
                         ),
-                        const SizedBox(width: 10),
-                        Text(
-                          _isOnline ? 'Online' : 'Offline',
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w700,
-                            color: _isOnline ? AppColors.success : AppColors.textSecondary,
-                          ),
+                        const SizedBox(width: 12),
+                        Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              _isOnline ? 'Online' : 'Offline',
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w800,
+                                color: _isOnline ? AppColors.success : AppColors.textSecondary,
+                                letterSpacing: -0.3,
+                              ),
+                            ),
+                            Text(
+                              _isOnline ? 'Accepting rides' : 'Not accepting rides',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: Colors.grey.shade500,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
                         ),
                         const Spacer(),
                       if (_isOnline)
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 10,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: AppColors.success.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Row(
-                            children: [
-                              const Icon(
-                                Icons.person_search,
-                                size: 14,
-                                color: AppColors.success,
-                              ),
-                              const SizedBox(width: 4),
-                              Text(
-                                '${_nearbyRequests.length} nearby',
-                                style: const TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: AppColors.success,
+                        TweenAnimationBuilder<double>(
+                          tween: Tween(begin: 0.0, end: 1.0),
+                          duration: const Duration(milliseconds: 400),
+                          builder: (context, value, child) {
+                            return Transform.scale(
+                              scale: value,
+                              child: Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 6,
+                                ),
+                                decoration: BoxDecoration(
+                                  gradient: LinearGradient(
+                                    colors: [
+                                      AppColors.success.withOpacity(0.15),
+                                      AppColors.success.withOpacity(0.08),
+                                    ],
+                                  ),
+                                  borderRadius: BorderRadius.circular(20),
+                                  border: Border.all(
+                                    color: AppColors.success.withOpacity(0.3),
+                                    width: 1,
+                                  ),
+                                ),
+                                child: Row(
+                                  children: [
+                                    Container(
+                                      padding: const EdgeInsets.all(4),
+                                      decoration: BoxDecoration(
+                                        color: AppColors.success.withOpacity(0.2),
+                                        shape: BoxShape.circle,
+                                      ),
+                                      child: const Icon(
+                                        Icons.person_search_rounded,
+                                        size: 12,
+                                        color: AppColors.success,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 6),
+                                    Text(
+                                      '${_nearbyRides.isNotEmpty ? _nearbyRides.length : _nearbyRequests.length} nearby',
+                                      style: const TextStyle(
+                                        fontSize: 12,
+                                        fontWeight: FontWeight.w700,
+                                        color: AppColors.success,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                            ],
-                          ),
+                            );
+                          },
                         ),
                     ],
                   ),
@@ -823,55 +913,156 @@ class _DriverHomePageState extends State<DriverHomePage> {
             child: SafeArea(
               child: Column(
                 children: [
-                  // My location button
+                  // My location button with improved design
                   Align(
                     alignment: Alignment.centerRight,
                     child: Container(
                       margin: const EdgeInsets.only(right: 16, bottom: 16),
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.1),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
                       child: FloatingActionButton(
                         onPressed: _getCurrentLocation,
                         backgroundColor: Colors.white,
-                        child: const Icon(
-                          Icons.my_location,
-                          color: AppColors.primary,
+                        elevation: 0,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: [
+                                AppColors.primary.withOpacity(0.1),
+                                AppColors.primary.withOpacity(0.05),
+                              ],
+                            ),
+                          ),
+                          child: const Center(
+                            child: Icon(
+                              Icons.my_location_rounded,
+                              color: AppColors.primary,
+                            ),
+                          ),
                         ),
                       ),
                     ),
                   ),
 
-                  // Online/Offline toggle
+                  // Enhanced Online/Offline toggle
                   Container(
                     margin: const EdgeInsets.all(16),
-                    width: double.infinity,
-                    child: ElevatedButton(
-                      onPressed: _toggleOnlineStatus,
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: _isOnline ? AppColors.error : AppColors.success,
-                        foregroundColor: Colors.white,
-                        elevation: 0,
-                        shadowColor: (_isOnline ? AppColors.error : AppColors.success)
-                            .withOpacity(0.3),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(12),
+                    padding: const EdgeInsets.all(6),
+                    decoration: BoxDecoration(
+                      color: Colors.white,
+                      borderRadius: BorderRadius.circular(20),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.08),
+                          blurRadius: 20,
+                          offset: const Offset(0, -4),
                         ),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                      ),
-                      child: Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(
-                            _isOnline ? Icons.pause_circle : Icons.play_circle,
-                            size: 22,
-                          ),
-                          const SizedBox(width: 10),
-                          Text(
-                            _isOnline ? 'Go Offline' : 'Go Online',
-                            style: const TextStyle(
-                              fontSize: 16,
-                              fontWeight: FontWeight.w700,
+                      ],
+                    ),
+                    child: Material(
+                      color: Colors.transparent,
+                      child: InkWell(
+                        onTap: _toggleOnlineStatus,
+                        borderRadius: BorderRadius.circular(16),
+                        child: AnimatedContainer(
+                          duration: const Duration(milliseconds: 300),
+                          padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                              colors: _isOnline 
+                                  ? [
+                                      const Color(0xFFFF4757),
+                                      const Color(0xFFFF6B81),
+                                    ]
+                                  : [
+                                      const Color(0xFF2ED573),
+                                      const Color(0xFF7BED9F),
+                                    ],
                             ),
+                            borderRadius: BorderRadius.circular(16),
+                            boxShadow: [
+                              BoxShadow(
+                                color: (_isOnline ? const Color(0xFFFF4757) : const Color(0xFF2ED573))
+                                    .withOpacity(0.4),
+                                blurRadius: 12,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
                           ),
-                        ],
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              AnimatedSwitcher(
+                                duration: const Duration(milliseconds: 300),
+                                transitionBuilder: (child, animation) {
+                                  return RotationTransition(
+                                    turns: animation,
+                                    child: ScaleTransition(
+                                      scale: animation,
+                                      child: child,
+                                    ),
+                                  );
+                                },
+                                child: Icon(
+                                  _isOnline ? Icons.power_settings_new_rounded : Icons.play_arrow_rounded,
+                                  key: ValueKey(_isOnline),
+                                  size: 24,
+                                  color: Colors.white,
+                                ),
+                              ),
+                              const SizedBox(width: 12),
+                              Column(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _isOnline ? 'Go Offline' : 'Go Online',
+                                    style: const TextStyle(
+                                      fontSize: 17,
+                                      fontWeight: FontWeight.w800,
+                                      color: Colors.white,
+                                      letterSpacing: -0.3,
+                                    ),
+                                  ),
+                                  Text(
+                                    _isOnline ? 'Stop accepting rides' : 'Start accepting rides',
+                                    style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w500,
+                                      color: Colors.white.withOpacity(0.85),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                              const Spacer(),
+                              Container(
+                                padding: const EdgeInsets.all(10),
+                                decoration: BoxDecoration(
+                                  color: Colors.white.withOpacity(0.2),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Icon(
+                                  _isOnline ? Icons.stop_rounded : Icons.arrow_forward_rounded,
+                                  size: 20,
+                                  color: Colors.white,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
                   ),
