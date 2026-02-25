@@ -611,9 +611,13 @@ class _DriverActiveRidePageState extends State<DriverActiveRidePage>
       MaterialPageRoute(
         builder: (context) => ChatScreenPage(
           recipientId: widget.ride.userId,
-          recipientName: widget.ride.userName ?? 'User',
+          recipientName: widget.ride.userName ?? 'Passenger',
           recipientImage: widget.ride.userPhoto,
+          recipientPhone: widget.ride.userPhone,
           rideId: widget.ride.id,
+          rideStatus: widget.ride.status,
+          pickupAddress: widget.ride.pickupAddress,
+          dropoffAddress: widget.ride.dropoffAddress,
           isOnline: true,
         ),
       ),

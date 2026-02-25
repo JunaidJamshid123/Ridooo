@@ -1,7 +1,9 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:supabase_flutter/supabase_flutter.dart';
+import '../../../../../core/theme/app_colors.dart';
 import '../../../../user/chat/presentation/pages/chat_screen_page.dart';
 
 /// Driver chat list page showing all driver conversations - Dynamic with Supabase
@@ -20,6 +22,7 @@ class _DriverChatListPageState extends State<DriverChatListPage>
   final _supabase = Supabase.instance.client;
   List<ChatConversation> _conversations = [];
   bool _isLoading = true;
+  bool _isRefreshing = false;
   StreamSubscription? _subscription;
 
   @override
@@ -67,6 +70,7 @@ class _DriverChatListPageState extends State<DriverChatListPage>
       final List<String> rideIds = [];
       final List<String> userIds = [];
       final Map<String, String> rideToUserMap = {};
+      final Map<String, Map<String, dynamic>> rideDataMap = {};
       
       // First pass: collect ride and user IDs
       for (final offer in offersResponse as List) {
@@ -89,6 +93,7 @@ class _DriverChatListPageState extends State<DriverChatListPage>
           userIds.add(passengerId);
         }
         rideToUserMap[rideId] = passengerId;
+        rideDataMap[rideId] = rideData;
         
         conversationsMap[rideId] = ChatConversation(
           id: rideId,
@@ -96,10 +101,14 @@ class _DriverChatListPageState extends State<DriverChatListPage>
           rideId: rideId,
           passengerName: 'Passenger', // Will be updated below
           passengerImage: null,
+          passengerPhone: null,
           lastMessage: 'Start a conversation',
           timestamp: DateTime.parse(rideData['created_at'] as String),
           unreadCount: 0,
           isOnline: true,
+          rideStatus: rideStatus,
+          pickupAddress: rideData['pickup_address'] as String?,
+          dropoffAddress: rideData['dropoff_address'] as String?,
         );
       }
       
@@ -107,7 +116,7 @@ class _DriverChatListPageState extends State<DriverChatListPage>
       if (userIds.isNotEmpty) {
         final usersResponse = await _supabase
             .from('users')
-            .select('id, name, profile_image')
+            .select('id, name, phone_number, profile_image')
             .inFilter('id', userIds);
         
         final Map<String, Map<String, dynamic>> usersMap = {};
@@ -123,6 +132,7 @@ class _DriverChatListPageState extends State<DriverChatListPage>
           final userData = usersMap[passengerId];
           if (userData != null) {
             final name = userData['name'] as String? ?? 'Passenger';
+            final phone = userData['phone_number'] as String?;
             final photo = userData['profile_image'] as String?;
             
             final existing = conversationsMap[rideId]!;
@@ -132,10 +142,14 @@ class _DriverChatListPageState extends State<DriverChatListPage>
               rideId: existing.rideId,
               passengerName: name.isNotEmpty ? name : 'Passenger',
               passengerImage: photo,
+              passengerPhone: phone,
               lastMessage: existing.lastMessage,
               timestamp: existing.timestamp,
               unreadCount: existing.unreadCount,
               isOnline: existing.isOnline,
+              rideStatus: existing.rideStatus,
+              pickupAddress: existing.pickupAddress,
+              dropoffAddress: existing.dropoffAddress,
             );
           }
         }
@@ -179,12 +193,16 @@ class _DriverChatListPageState extends State<DriverChatListPage>
             rideId: conversation.rideId,
             passengerName: conversation.passengerName,
             passengerImage: conversation.passengerImage,
+            passengerPhone: conversation.passengerPhone,
             lastMessage: lastMsg?['content'] as String? ?? 'Start a conversation',
             timestamp: lastMsg != null
                 ? DateTime.parse(lastMsg['created_at'] as String)
                 : conversation.timestamp,
             unreadCount: unreadCounts[rideId] ?? 0,
             isOnline: true,
+            rideStatus: conversation.rideStatus,
+            pickupAddress: conversation.pickupAddress,
+            dropoffAddress: conversation.dropoffAddress,
           );
         }
       }
@@ -223,11 +241,15 @@ class _DriverChatListPageState extends State<DriverChatListPage>
   Widget build(BuildContext context) {
     super.build(context);
     return Scaffold(
-      backgroundColor: Colors.grey.shade50,
+      backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text(
           'Messages',
-          style: TextStyle(fontWeight: FontWeight.w600),
+          style: TextStyle(
+            fontWeight: FontWeight.w600,
+            fontSize: 18,
+            color: Color(0xFF1A1A1A),
+          ),
         ),
         centerTitle: false,
         elevation: 0,
@@ -236,19 +258,38 @@ class _DriverChatListPageState extends State<DriverChatListPage>
         surfaceTintColor: Colors.white,
         actions: [
           IconButton(
-            onPressed: _loadConversations,
-            icon: const Icon(Icons.refresh),
+            onPressed: () async {
+              HapticFeedback.lightImpact();
+              setState(() => _isRefreshing = true);
+              await _loadConversations();
+              setState(() => _isRefreshing = false);
+            },
+            icon: _isRefreshing
+                ? SizedBox(
+                    width: 20,
+                    height: 20,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: AppColors.primary,
+                    ),
+                  )
+                : const Icon(Icons.refresh, color: Color(0xFF5F6368)),
           ),
         ],
       ),
       body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
+          ? Center(
+              child: CircularProgressIndicator(color: AppColors.primary),
+            )
           : _conversations.isEmpty
               ? _buildEmptyState()
               : RefreshIndicator(
                   onRefresh: _loadConversations,
-                  child: ListView.builder(
+                  color: AppColors.primary,
+                  child: ListView.separated(
+                    padding: const EdgeInsets.symmetric(vertical: 8),
                     itemCount: _conversations.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1, indent: 76),
                     itemBuilder: (context, index) {
                       final conversation = _conversations[index];
                       return _buildChatItem(conversation);
@@ -259,188 +300,239 @@ class _DriverChatListPageState extends State<DriverChatListPage>
   }
 
   Widget _buildChatItem(ChatConversation conversation) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.grey.shade200),
-      ),
-      child: Material(
-        color: Colors.transparent,
-        child: InkWell(
-          borderRadius: BorderRadius.circular(12),
-          onTap: () {
-            Navigator.push(
-              context,
-              MaterialPageRoute(
-                builder: (context) => ChatScreenPage(
-                  recipientId: conversation.passengerId ?? '',
-                  recipientName: conversation.passengerName,
-                  recipientImage: conversation.passengerImage,
-                  rideId: conversation.rideId,
-                  isOnline: conversation.isOnline,
-                ),
+    final hasUnread = conversation.unreadCount > 0;
+    
+    return Material(
+      color: Colors.white,
+      child: InkWell(
+        onTap: () {
+          HapticFeedback.lightImpact();
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => ChatScreenPage(
+                recipientId: conversation.passengerId ?? '',
+                recipientName: conversation.passengerName,
+                recipientImage: conversation.passengerImage,
+                recipientPhone: conversation.passengerPhone,
+                rideId: conversation.rideId,
+                isOnline: conversation.isOnline,
+                rideStatus: conversation.rideStatus,
+                pickupAddress: conversation.pickupAddress,
+                dropoffAddress: conversation.dropoffAddress,
               ),
-            );
-          },
-          child: Padding(
-            padding: const EdgeInsets.all(14),
-            child: Row(
-              children: [
-                // Passenger Avatar
-                Stack(
-                  children: [
-                    CircleAvatar(
-                      radius: 28,
-                      backgroundColor: Colors.grey.shade200,
-                      child: Text(
-                        conversation.passengerName[0].toUpperCase(),
-                        style: const TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.w600,
-                          color: Color(0xFF1A1A1A),
+            ),
+          ).then((_) => _loadConversations());
+        },
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+          child: Row(
+            children: [
+              // Avatar
+              Stack(
+                children: [
+                  CircleAvatar(
+                    radius: 24,
+                    backgroundColor: const Color(0xFFF0F2F5),
+                    backgroundImage: conversation.passengerImage != null
+                        ? NetworkImage(conversation.passengerImage!)
+                        : null,
+                    child: conversation.passengerImage == null
+                        ? Text(
+                            conversation.passengerName.isNotEmpty
+                                ? conversation.passengerName[0].toUpperCase()
+                                : 'P',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: AppColors.primary,
+                            ),
+                          )
+                        : null,
+                  ),
+                  if (conversation.isOnline)
+                    Positioned(
+                      bottom: 0,
+                      right: 0,
+                      child: Container(
+                        width: 12,
+                        height: 12,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF4CAF50),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white, width: 2),
                         ),
                       ),
                     ),
-                    if (conversation.isOnline)
-                      Positioned(
-                        bottom: 0,
-                        right: 0,
-                        child: Container(
-                          width: 14,
-                          height: 14,
-                          decoration: BoxDecoration(
-                            color: Colors.green,
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white, width: 2),
+                ],
+              ),
+              const SizedBox(width: 12),
+              
+              // Chat Info
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            conversation.passengerName,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: hasUnread ? FontWeight.w600 : FontWeight.w500,
+                              color: const Color(0xFF1A1A1A),
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                      ),
-                  ],
-                ),
-                const SizedBox(width: 14),
-                
-                // Chat Info
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
+                        Text(
+                          _formatTimestamp(conversation.timestamp),
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: hasUnread ? AppColors.primary : const Color(0xFF9E9E9E),
+                            fontWeight: hasUnread ? FontWeight.w600 : FontWeight.normal,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            conversation.lastMessage,
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: hasUnread ? const Color(0xFF1A1A1A) : const Color(0xFF9E9E9E),
+                              fontWeight: hasUnread ? FontWeight.w500 : FontWeight.normal,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (hasUnread) ...[
+                          const SizedBox(width: 8),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                            decoration: BoxDecoration(
+                              color: AppColors.primary,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
                             child: Text(
-                              conversation.passengerName,
+                              '${conversation.unreadCount}',
                               style: const TextStyle(
-                                fontSize: 16,
+                                color: Colors.white,
+                                fontSize: 11,
                                 fontWeight: FontWeight.w600,
                               ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Text(
-                            _formatTimestamp(conversation.timestamp),
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: conversation.unreadCount > 0
-                                  ? const Color(0xFF1A1A1A)
-                                  : Colors.grey.shade600,
-                              fontWeight: conversation.unreadCount > 0
-                                  ? FontWeight.w600
-                                  : FontWeight.normal,
                             ),
                           ),
                         ],
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: Text(
-                              conversation.lastMessage,
-                              style: TextStyle(
-                                fontSize: 14,
-                                color: conversation.unreadCount > 0
-                                    ? const Color(0xFF1A1A1A)
-                                    : Colors.grey.shade600,
-                                fontWeight: conversation.unreadCount > 0
-                                    ? FontWeight.w500
-                                    : FontWeight.normal,
-                              ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                          ),
-                          if (conversation.unreadCount > 0) ...[
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 8,
-                                vertical: 4,
-                              ),
-                              decoration: const BoxDecoration(
-                                color: Color(0xFF1A1A1A),
-                                shape: BoxShape.circle,
-                              ),
-                              child: Text(
-                                '${conversation.unreadCount}',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                  fontSize: 11,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
+                      ],
+                    ),
+                    if (conversation.rideStatus != null) ...[
+                      const SizedBox(height: 6),
+                      _buildStatusChip(conversation.rideStatus!),
                     ],
-                  ),
+                  ],
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),
     );
   }
+  
+  Widget _buildStatusChip(String status) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: _getRideStatusColor(status).withAlpha(25),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Text(
+        _getRideStatusText(status),
+        style: TextStyle(
+          fontSize: 11,
+          color: _getRideStatusColor(status),
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+  
+  Color _getRideStatusColor(String status) {
+    switch (status) {
+      case 'in_progress':
+        return Colors.blue;
+      case 'arrived':
+        return Colors.orange;
+      case 'accepted':
+        return Colors.green;
+      case 'completed':
+        return Colors.grey;
+      default:
+        return AppColors.primary;
+    }
+  }
+
+  String _getRideStatusText(String status) {
+    switch (status) {
+      case 'in_progress':
+        return 'Trip in Progress';
+      case 'arrived':
+        return 'At Pickup';
+      case 'accepted':
+        return 'En Route';
+      case 'completed':
+        return 'Completed';
+      default:
+        return status;
+    }
+  }
 
   Widget _buildEmptyState() {
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Container(
-            padding: const EdgeInsets.all(24),
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              shape: BoxShape.circle,
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(20),
+              decoration: const BoxDecoration(
+                color: Color(0xFFF0F2F5),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(
+                Icons.chat_bubble_outline_rounded,
+                size: 40,
+                color: AppColors.primary,
+              ),
             ),
-            child: Icon(
-              Icons.chat_bubble_outline,
-              size: 64,
-              color: Colors.grey.shade400,
+            const SizedBox(height: 20),
+            const Text(
+              'No messages yet',
+              style: TextStyle(
+                fontSize: 17,
+                fontWeight: FontWeight.w600,
+                color: Color(0xFF1A1A1A),
+              ),
             ),
-          ),
-          const SizedBox(height: 24),
-          const Text(
-            'No messages yet',
-            style: TextStyle(
-              fontSize: 20,
-              fontWeight: FontWeight.w600,
+            const SizedBox(height: 8),
+            const Text(
+              'Messages from passengers will appear here',
+              style: TextStyle(
+                fontSize: 14,
+                color: Color(0xFF9E9E9E),
+              ),
+              textAlign: TextAlign.center,
             ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            'Start a conversation with your passengers',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey.shade600,
-            ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -474,10 +566,14 @@ class ChatConversation {
   final String? rideId;
   final String passengerName;
   final String? passengerImage;
+  final String? passengerPhone;
   final String lastMessage;
   final DateTime timestamp;
   final int unreadCount;
   final bool isOnline;
+  final String? rideStatus;
+  final String? pickupAddress;
+  final String? dropoffAddress;
 
   ChatConversation({
     required this.id,
@@ -485,9 +581,13 @@ class ChatConversation {
     this.rideId,
     required this.passengerName,
     this.passengerImage,
+    this.passengerPhone,
     required this.lastMessage,
     required this.timestamp,
     required this.unreadCount,
     required this.isOnline,
+    this.rideStatus,
+    this.pickupAddress,
+    this.dropoffAddress,
   });
 }
